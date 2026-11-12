@@ -1,17 +1,17 @@
-import { drivers } from "../shared/contracts.ts";
-import type { CaseId, CaseView, Driver, Evidence, Role } from "../shared/contracts.ts";
+import { caseIds, contribution, drivers } from "../shared/contracts.ts";
+import type { BusinessLedger, CaseId, CaseView, Driver, Evidence, LedgerAmounts, Period, Role, Transaction } from "../shared/contracts.ts";
+import { generateTransactions, periodDates } from "./transactions.ts";
+import type { ChannelSeed } from "./transactions.ts";
 
-type Ledger = Record<Driver, number>;
-type Channel = [name: string, previous: number[], current: number[]];
 interface Scenario {
   name: string;
   headline: string;
   description: string;
-  channels: Channel[];
+  channels: ChannelSeed[];
   shape: number[];
 }
 
-// Synthetic, fixed snapshots. Tuple order follows the accounting bridge in contracts.ts.
+// Seed budgets generate source transactions. Dashboards and evidence aggregate those transactions.
 const scenarios: Record<CaseId, Scenario> = {
   promotion: {
     name: "大促利润下滑",
@@ -58,49 +58,56 @@ export const scopes: Record<Role, Driver[]> = {
   quality: ["sales", "refunds"],
 };
 
-function totals(channels: Channel[], period: 1 | 2): Ledger {
-  return Object.fromEntries(drivers.map((metric, index) => [
-    metric, channels.reduce((sum, channel) => sum + channel[period][index], 0),
-  ])) as Ledger;
+const transactions = new Map(caseIds.map((id) => [id, generateTransactions(id, scenarios[id].channels, scenarios[id].shape)]));
+
+function totals(rows: Transaction[]): LedgerAmounts {
+  const amounts: LedgerAmounts = { sales: 0, refunds: 0, cogs: 0, ads: 0, fees: 0 };
+  for (const row of rows) amounts[row.metric] += row.amount;
+  return amounts;
 }
 
-function metrics(ledger: Ledger) {
-  const { sales, refunds, cogs, ads, fees } = ledger;
-  const contribution = sales - refunds - cogs - ads - fees;
-  return { sales, contribution, margin: contribution / sales, refundRate: refunds / sales };
+function byPeriod(rows: Transaction[]): Record<Period, LedgerAmounts> {
+  return {
+    previous: totals(rows.filter((row) => row.period === "previous")),
+    current: totals(rows.filter((row) => row.period === "current")),
+  };
+}
+
+function metrics(ledger: LedgerAmounts) {
+  const { sales, refunds } = ledger;
+  const profit = contribution(ledger);
+  return { sales, contribution: profit, margin: profit / sales, refundRate: refunds / sales };
 }
 
 function impact(metric: Driver, previous: number, current: number) {
   return (current - previous) * (metric === "sales" ? 1 : -1);
 }
 
-function distribute(total: number, weights: number[]) {
-  const weightSum = weights.reduce((sum, weight) => sum + weight, 0);
-  let cumulative = 0;
-  let distributed = 0;
-  return weights.map((weight) => {
-    cumulative += weight;
-    const nextTotal = Math.round(total * cumulative / weightSum);
-    const part = nextTotal - distributed;
-    distributed = nextTotal;
-    return part;
-  });
+export function businessLedger(id: CaseId): BusinessLedger {
+  const rows = transactions.get(id)!;
+  return {
+    transactions: rows,
+    channels: scenarios[id].channels.map(([name]) => ({
+      name, amounts: byPeriod(rows.filter((row) => row.channel === name)),
+    })),
+  };
 }
 
 export function caseView(id: CaseId): CaseView {
-  const { name, headline, description, channels, shape } = scenarios[id];
-  const previous = totals(channels, 1);
-  const current = totals(channels, 2);
+  const { name, headline, description } = scenarios[id];
+  const rows = transactions.get(id)!;
+  const amounts = byPeriod(rows);
+  const { previous, current } = amounts;
   const baseline = metrics(previous);
   const actual = metrics(current);
-  const previousDays = distribute(baseline.contribution, [142, 137, 151, 145, 150, 156, 119]);
-  const currentDays = distribute(actual.contribution, shape);
+  const dayProfit = (day: string) => contribution(totals(rows.filter((row) => row.occurredAt.startsWith(day))));
+  const previousDays = periodDates("previous");
   return {
-    id, name, headline, description, metrics: actual, baseline,
+    id, name, headline, description, metrics: actual, baseline, amounts,
     range: "2026.11.02 – 11.08",
     previousRange: "2026.10.26 – 11.01",
-    daily: currentDays.map((value, index) => ({
-      day: `11/${String(index + 2).padStart(2, "0")}`, current: value, previous: previousDays[index],
+    daily: periodDates("current").map((day, index) => ({
+      day: day.slice(5).replace("-", "/"), current: dayProfit(day), previous: dayProfit(previousDays[index]),
     })),
     bridge: drivers.map((metric) => ({
       metric, label: labels[metric], impact: impact(metric, previous[metric], current[metric]),
@@ -109,15 +116,15 @@ export function caseView(id: CaseId): CaseView {
 }
 
 export function evidenceFor(id: CaseId): Evidence[] {
-  return scenarios[id].channels.flatMap(([channel, previous, current], channelIndex) =>
-    drivers.map((metric, index) => ({
+  return businessLedger(id).channels.flatMap(({ name: channel, amounts: { previous, current } }, channelIndex) =>
+    drivers.map((metric) => ({
       id: `${metric}-${channelIndex + 1}`,
       label: labels[metric],
       channel,
       metric,
-      previous: previous[index],
-      current: current[index],
-      impact: impact(metric, previous[index], current[index]),
+      previous: previous[metric],
+      current: current[metric],
+      impact: impact(metric, previous[metric], current[metric]),
     })),
   );
 }

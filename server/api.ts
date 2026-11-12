@@ -3,7 +3,7 @@ import { resolve } from "node:path";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { z } from "zod";
 import { caseIds } from "../shared/contracts.ts";
-import { caseView, evidenceFor } from "./data.ts";
+import { businessLedger, caseView, evidenceFor } from "./data.ts";
 import { configuredModels } from "./models.ts";
 import type { AgentModels } from "./models.ts";
 import { openStore } from "./store.ts";
@@ -24,7 +24,8 @@ async function body(req: IncomingMessage): Promise<unknown> {
   try { return JSON.parse(content); } catch { return null; }
 }
 
-const createSchema = z.object({ caseId: z.enum(caseIds) });
+const caseSchema = z.enum(caseIds);
+const createSchema = z.object({ caseId: caseSchema });
 const decisionSchema = z.object({ decision: z.enum(["approved", "rejected"]) });
 
 export function createApi({
@@ -83,6 +84,10 @@ export function createApi({
         json(res, 403, { error: "只允许从研判台同源提交操作。" });
       } else if (req.method === "GET" && path === "/api/bootstrap") {
         json(res, 200, { mode: models.mode, cases: caseIds.map(caseView), runs: store.list() });
+      } else if (req.method === "GET" && /^\/api\/cases\/[^/]+\/ledger$/.test(path)) {
+        const id = caseSchema.safeParse(path.split("/")[3]);
+        if (id.success) json(res, 200, businessLedger(id.data));
+        else json(res, 404, { error: "未找到该案例的业务流水。" });
       } else if (req.method === "POST" && path === "/api/runs") {
         const input = createSchema.safeParse(await body(req));
         if (!input.success) {

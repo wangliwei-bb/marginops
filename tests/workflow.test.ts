@@ -6,9 +6,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { caseIds } from "../shared/contracts.ts";
-import type { Run } from "../shared/contracts.ts";
+import type { BusinessLedger, Run } from "../shared/contracts.ts";
 import { createApi } from "../server/api.ts";
-import { caseView, evidenceFor } from "../server/data.ts";
+import { businessLedger, caseView, evidenceFor } from "../server/data.ts";
 import { replayModels } from "../server/models.ts";
 import { openStore } from "../server/store.ts";
 import { investigate } from "../server/workflow.ts";
@@ -21,6 +21,28 @@ test("case charts and evidence reconcile with the accounting bridge", () => {
     assert.equal(sum("current"), scenario.metrics.contribution);
     assert.equal(sum("previous"), scenario.baseline.contribution);
     assert.equal(evidenceFor(id).reduce((total, fact) => total + fact.impact, 0), sum("current") - sum("previous"));
+  }
+});
+
+test("each evidence figure links to source transactions in both periods", () => {
+  for (const id of caseIds) {
+    const { transactions } = businessLedger(id);
+    assert.equal(new Set(transactions.map((row) => row.id)).size, transactions.length);
+    for (const fact of evidenceFor(id)) {
+      const source = transactions.filter((row) => row.channel === fact.channel && row.metric === fact.metric);
+      for (const period of ["current", "previous"] as const) {
+        assert.equal(source.filter((row) => row.period === period).reduce((sum, row) => sum + row.amount, 0), fact[period]);
+      }
+    }
+    const payments = new Map(transactions.filter((row) => row.metric === "sales").map((row) => [row.orderId, row]));
+    for (const row of transactions.filter((entry) => entry.metric === "refunds" || entry.metric === "cogs")) {
+      const payment = payments.get(row.orderId);
+      assert(payment);
+      assert.equal(row.channel, payment.channel);
+      assert.equal(row.period, payment.period);
+      assert(row.occurredAt > payment.occurredAt);
+      if (row.metric === "refunds") assert(row.amount <= payment.amount);
+    }
   }
 });
 
@@ -116,6 +138,8 @@ test("API streams the report and records exactly one concurrent decision", async
     method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(data),
   });
   assert.equal((await send("/api/runs", { caseId: "missing" })).status, 400);
+  assert.equal((await fetch(base + "/api/cases/missing/ledger")).status, 404);
+  const ledger = await (await fetch(base + "/api/cases/acquisition/ledger")).json() as BusinessLedger;
   const response = await send("/api/runs", { caseId: "acquisition" });
   assert.equal(response.status, 202);
   const created = await response.json() as Run;
@@ -130,5 +154,9 @@ test("API streams the report and records exactly one concurrent decision", async
   assert.deepEqual(decisions.map(({ status }) => status).sort(), [200, 409]);
   const result = await (await fetch(base + path)).json() as Run;
   assert.equal(result.report?.driver, "ads");
+  const fact = result.evidence.find((entry) => entry.id === result.report?.evidenceIds[0]);
+  assert(fact);
+  assert.equal(ledger.transactions.filter((row) => row.period === "current" && row.channel === fact.channel && row.metric === fact.metric)
+    .reduce((sum, row) => sum + row.amount, 0), fact.current);
   assert.equal(result.events.filter((event) => event.phase === "decision").length, 1);
 });

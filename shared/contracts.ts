@@ -4,6 +4,33 @@ export const roles = ["growth", "margin", "quality"] as const;
 export type Role = (typeof roles)[number];
 export const drivers = ["sales", "refunds", "cogs", "ads", "fees"] as const;
 export type Driver = (typeof drivers)[number];
+export type Period = "current" | "previous";
+export type LedgerAmounts = Record<Driver, number>;
+
+export const transactionNames: Record<Driver, string> = {
+  sales: "订单收款", refunds: "售后退款", cogs: "出库成本", ads: "广告扣费", fees: "平台结算扣费",
+};
+
+export function contribution({ sales, refunds, cogs, ads, fees }: LedgerAmounts) {
+  return sales - refunds - cogs - ads - fees;
+}
+
+export interface Transaction {
+  id: string;
+  occurredAt: string;
+  period: Period;
+  channel: string;
+  metric: Driver;
+  document: string;
+  orderId: string | null;
+  description: string;
+  amount: number;
+}
+
+export interface BusinessLedger {
+  transactions: Transaction[];
+  channels: { name: string; amounts: Record<Period, LedgerAmounts> }[];
+}
 export type Step = Role | "prepare" | "synthesis" | "review" | "approval";
 export type Mode = "replay" | "live";
 export type Status = "running" | "review_required" | "approved" | "rejected" | "failed";
@@ -33,6 +60,7 @@ export interface CaseView {
   previousRange: string;
   metrics: { sales: number; contribution: number; margin: number; refundRate: number };
   baseline: CaseView["metrics"];
+  amounts: Record<Period, LedgerAmounts>;
   daily: { day: string; current: number; previous: number }[];
   bridge: { metric: Driver; label: string; impact: number }[];
 }
