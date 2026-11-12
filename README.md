@@ -1,0 +1,88 @@
+# MarginOps · 电商利润异动研判台
+
+[![CI](https://github.com/wangliwei-bb/marginops/actions/workflows/ci.yml/badge.svg)](https://github.com/wangliwei-bb/marginops/actions/workflows/ci.yml)
+
+大促周成交额上涨 18.8%，贡献利润却下降 23.8%。MarginOps 从渠道账本定位主要利润拖累，由三个专项 Agent 并行取证，生成带原始证据、负责人和验证指标的处置建议，再交给人审批。
+
+项目附带三组可复现的合成案例，默认无需 API Key。配置实时模型后，同一个工作流会调用 OpenAI Responses API。
+
+![MarginOps 经营指标、贡献利润走势和利润桥](docs/images/dashboard.png)
+
+## 运行演示
+
+需要 Node.js 24.12+（24.x）和 npm。
+
+```bash
+npm ci
+npm run dev
+```
+
+打开终端给出的本地地址，选择 **大促利润下滑**，点击 **发起多 Agent 研判**。查看直播间商品成本的上期和本期金额、各 Agent 的发现和运行轨迹。批准或驳回后，可在 **研判记录** 中重新打开报告。
+
+切换到 **投放成本攀升** 和 **退款率异常**，可以看到同一个工作流给出不同的归因与处置建议。
+
+<details>
+<summary>查看批准后的研判报告</summary>
+
+![带原始证据、处置建议和运行轨迹的研判报告](docs/images/report.png)
+
+</details>
+
+构建并启动本地生产包：
+
+```bash
+npm run build
+npm start
+```
+
+默认地址为 `http://127.0.0.1:4173`。审批与报告保存在 `.marginops/runs.sqlite`。
+
+### 启用实时模型
+
+在项目根目录用 [.env.example](.env.example) 建立 `.env`。将 `MARGINOPS_MODE` 改为 `live`，填入 `OPENAI_API_KEY` 和账号有权限调用的 `OPENAI_MODEL`。模型需支持 Responses API 的函数调用和结构化输出。重启服务后，工作台会显示实时模型模式。
+
+实时模型会收到合成案例信息和相应证据。Key 由服务端读取。`npm run eval -- --live` 会发起模型请求，常规测试使用回放。
+
+## 工作流与工程取舍
+
+```mermaid
+flowchart LR
+  A["账本核对"] --> B["增长 Agent"]
+  A --> C["利润 Agent"]
+  A --> D["售后 Agent"]
+  B --> E["汇总 Agent"]
+  C --> E
+  D --> E
+  E --> F["规则校验 + 审阅 Agent"]
+  F -->|最多三版| E
+  F -->|通过| G["人工审批"]
+  F -->|耗尽修订| H["研判失败"]
+  G --> I["持久化批准或驳回"]
+```
+
+- **证据边界**。服务端用会计恒等式核对利润桥，每条渠道科目都有稳定 ID。三个专项 Agent 各自通过只读工具获取权限内证据。实时模式调用模型生成专项发现、汇总和审阅。
+- **可解释的优先级**。本版把单个渠道最大的负向科目定义为优先排查项。代码核对首条引用、指标一致性和金额排名，审阅 Agent 检查文字是否夸大业务因果。处置动作和验证指标来自预设运营手册。
+- **审批和恢复**。SQLite 以事务保存状态变更与审计事件。同一案例同时只接受一条进行中的研判，同一报告只接受一次人工决策。重启保留报告和决策，进行中的研判标记为失败并可重跑。
+- **交互与可观测性**。React 接收 Server-Sent Events，在工作台显示取证、审阅与等待审批状态。可展开完整证据账本，复核每项金额和引用。
+
+技术栈使用 Node.js 24、TypeScript 7、LangGraph.js 1.7、OpenAI SDK 7、Zod 4、React 19、Vite 8 和 SQLite。界面审阅参考了 [Vercel Web Design Guidelines skill](https://github.com/vercel-labs/agent-skills/tree/main/skills/web-design-guidelines)。
+
+## 可复现验证
+
+```bash
+npm run check
+```
+
+检查包括生产构建、单元与集成测试和三个案例的端到端回放评估。GitHub Actions 在推送和拉取请求时运行同一命令。
+
+| 合成案例 | 预期首要排查项 | 首条证据 |
+| --- | --- | --- |
+| 大促利润下滑 | 直播间商品成本 | `cogs-1` |
+| 投放成本攀升 | 信息流投放成本 | `ads-1` |
+| 退款率异常 | 平台旗舰店退款 | `refunds-1` |
+
+`npm run eval` 核对归因、首条引用及三次取证调用，并输出每个案例的耗时和草案版本数。回放评估衡量工作流可复现性。接入模型后可单独运行评估，当前三个样本的结果只代表这三个合成场景。
+
+## 运行边界
+
+项目面向本地单进程作品演示。趋势图按合成周总额分配到七天，账本粒度为渠道与会计科目。审批代表记录人工决策，实际处置由负责人执行。系统只监听本地回环地址，操作员身份采用单用户假设。
