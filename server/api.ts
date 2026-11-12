@@ -28,7 +28,7 @@ const createSchema = z.object({ caseId: z.enum(caseIds) });
 const decisionSchema = z.object({ decision: z.enum(["approved", "rejected"]) });
 
 export function createApi({
-  dbPath = resolve(process.env.MARGINOPS_DB_PATH ?? ".marginops/runs.sqlite"),
+  dbPath = process.env.MARGINOPS_DB_PATH ?? resolve(".marginops", "runs.sqlite"),
   models = configuredModels(),
 } : { dbPath?: string; models?: AgentModels } = {}) {
   const store = openStore(dbPath);
