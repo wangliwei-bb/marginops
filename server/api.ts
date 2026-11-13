@@ -16,6 +16,8 @@ import { AnalysisClarification } from "./analysis-engine.ts";
 import { analyzeWorkbook, configuredPlanner, validateManualPlan } from "./analysis-workflow.ts";
 import { manualPlanSchema } from "./analysis-plan.ts";
 import type { AnalysisSource } from "../shared/analysis.ts";
+import { slaSampleWeek } from "../shared/sla.ts";
+import { reviewSla, slaReviewKey } from "./sla.ts";
 
 function json(res: ServerResponse, status: number, body: unknown) {
   res.writeHead(status, { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store" });
@@ -53,6 +55,11 @@ const sourceRequest = z.object({ group: z.coerce.number().int().min(1), page: z.
 const workbookTemplates = new Map([
   ["/api/import/template", "marginops-import.xlsx"],
   ["/api/analysis/template", "marginops-analysis-template.xlsx"],
+  ["/api/analysis/sla/template", "marginops-sla-template.xlsx"],
+]);
+const slaRequest = z.discriminatedUnion("sample", [
+  z.object({ sample: z.literal(true) }),
+  z.object({ sample: z.literal(false), workbookId, weekStart: z.iso.date() }),
 ]);
 
 export function createApi({
@@ -140,6 +147,24 @@ export function createApi({
         const book = await profileWorkbook(await workbookBody(req), options.data.name, options.data.headerRow);
         store.saveWorkbook(book);
         json(res, 200, book.summary);
+      } else if (req.method === "POST" && path === "/api/analysis/sla") {
+        const input = slaRequest.safeParse(await body(req));
+        if (!input.success) json(res, 400, { error: "请选择工作簿和有效的本期开始日期。" });
+        else {
+          const book = input.data.sample
+            ? await profileWorkbook(await readFile(resolve("server/samples/service-sla.xlsx")), "客服 SLA 示例.xlsx", 1)
+            : store.readWorkbook(input.data.workbookId);
+          if (!book || book.summary.kind) json(res, 404, { error: "未找到可复盘的原始工作簿。" });
+          else {
+            const weekStart = input.data.sample ? slaSampleWeek : input.data.weekStart;
+            const saved = store.readSlaReview(slaReviewKey(book.summary.id, weekStart));
+            if (saved) json(res, 200, saved);
+            else {
+              const { snapshot, reports, review } = await reviewSla(book, weekStart);
+              json(res, 200, store.saveSlaReview(snapshot, reports, review));
+            }
+          }
+        }
       } else if ((req.method === "GET" || req.method === "POST") && /^\/api\/analysis\/workbooks\/[a-f0-9]{64}\/profile$/.test(path)) {
         const id = path.split("/")[4];
         const book = store.readWorkbook(id);

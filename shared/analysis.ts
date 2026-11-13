@@ -18,6 +18,7 @@ export interface WorkbookSummary {
   headerRow: number;
   sheets: AnalysisSheet[];
   skipped: string[];
+  kind?: "sla-snapshot";
 }
 export type AnalysisMethod = "count" | "sum" | "average" | "min" | "max" | "distinct" | "share" | "ratio";
 export type TimeBucket = "day" | "month" | "year";

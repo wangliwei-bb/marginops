@@ -9,6 +9,7 @@ import type { CaseData } from "./data.ts";
 import type { AnalysisReport, BusinessProfile, WorkbookSummary } from "../shared/analysis.ts";
 import type { AnalysisWorkbook } from "./analysis-data.ts";
 import type { SourceIndex } from "./analysis-workflow.ts";
+import type { SlaReview } from "../shared/sla.ts";
 
 interface RunRow {
   id: string;
@@ -80,6 +81,10 @@ export function openStore(path: string) {
       workbook_id TEXT PRIMARY KEY REFERENCES analysis_workbooks(id),
       profile TEXT NOT NULL
     );
+    CREATE TABLE IF NOT EXISTS analysis_sla_reviews (
+      snapshot_id TEXT PRIMARY KEY REFERENCES analysis_workbooks(id),
+      review TEXT NOT NULL
+    );
     CREATE INDEX IF NOT EXISTS business_analyses_by_workbook ON business_analyses(workbook_id);
   `);
   const insertEvent = db.prepare("INSERT INTO events (run_id, step, phase, message, at) VALUES (?, ?, ?, ?, ?)");
@@ -134,7 +139,7 @@ export function openStore(path: string) {
         .run(summary.id, JSON.stringify(summary), JSON.stringify(tables));
     },
     listWorkbooks(): WorkbookSummary[] {
-      return db.prepare("SELECT summary FROM analysis_workbooks ORDER BY rowid DESC").all()
+      return db.prepare("SELECT summary FROM analysis_workbooks WHERE json_extract(summary, '$.kind') IS NOT 'sla-snapshot' ORDER BY rowid DESC").all()
         .map(({ summary }) => JSON.parse(String(summary)));
     },
     readWorkbook(id: string): AnalysisWorkbook | null {
@@ -152,6 +157,22 @@ export function openStore(path: string) {
     saveAnalysis(report: AnalysisReport, sources: SourceIndex) {
       db.prepare("INSERT INTO business_analyses (id, workbook_id, report, sources) VALUES (?, ?, ?, ?)")
         .run(report.id, report.workbookId, JSON.stringify(report), JSON.stringify(sources));
+    },
+    readSlaReview(id: string): SlaReview | undefined {
+      const row = db.prepare("SELECT review FROM analysis_sla_reviews WHERE snapshot_id = ?").get(id);
+      return row ? JSON.parse(String(row.review)) : undefined;
+    },
+    saveSlaReview(snapshot: AnalysisWorkbook, reports: { report: AnalysisReport; sources: SourceIndex }[], review: SlaReview): SlaReview {
+      return transaction(() => {
+        const existing = db.prepare("SELECT review FROM analysis_sla_reviews WHERE snapshot_id = ?").get(snapshot.summary.id);
+        if (existing) return JSON.parse(String(existing.review));
+        db.prepare("INSERT INTO analysis_workbooks (id, summary, tables) VALUES (?, ?, ?) ON CONFLICT(id) DO NOTHING")
+          .run(snapshot.summary.id, JSON.stringify(snapshot.summary), JSON.stringify(snapshot.tables));
+        const insert = db.prepare("INSERT INTO business_analyses (id, workbook_id, report, sources) VALUES (?, ?, ?, ?)");
+        for (const { report, sources } of reports) insert.run(report.id, report.workbookId, JSON.stringify(report), JSON.stringify(sources));
+        db.prepare("INSERT INTO analysis_sla_reviews (snapshot_id, review) VALUES (?, ?)").run(snapshot.summary.id, JSON.stringify(review));
+        return review;
+      });
     },
     listAnalyses(workbookId: string): AnalysisReport[] {
       return db.prepare("SELECT report FROM business_analyses WHERE workbook_id = ? ORDER BY rowid DESC LIMIT 20")

@@ -4,6 +4,7 @@ import type { AnalysisOutcome, AnalysisPlan, AnalysisReport, AnalysisSource, Bus
 import { maxWorkbookBytes } from "../shared/contracts.ts";
 import { post, request } from "./api.ts";
 import { emptyPlan, PlanEditor, planReady } from "./analysis-plan.tsx";
+import { SlaScenario } from "./sla.tsx";
 
 const examples = ["按部门比较平均处理时长", "按月统计记录数", "按部门统计状态等于“延期”的记录占比"];
 const labels = { included: "参与计算", numerator: "计入分子及分母", denominator: "仅计入分母", excluded: "未参与（缺值）" };
@@ -34,7 +35,7 @@ function SourceRows({ report, group }: { report: AnalysisReport; group: number }
     <div className="table-scroll" tabIndex={0} aria-label="原始 Excel 数据">
       <table><thead><tr><th scope="col">Excel 行号</th><th scope="col">计入口径</th>
         {source.columns.map((column) => <th key={column.id} className={used.has(column.id) ? "analysis-source-column" : undefined}
-          scope="col">{column.id} · {column.name}</th>)}</tr></thead>
+          scope="col">{column.id.startsWith("derived-") ? "计算" : column.id} · {column.name}</th>)}</tr></thead>
         <tbody>{source.rows.map(({ row, values, use }) => <tr key={row}>
           <th scope="row">{row}</th><td>{labels[use]}</td>
           {source.columns.map(({ id }, index) => <td key={id} className={used.has(id) ? "analysis-source-column" : undefined}>
@@ -200,6 +201,8 @@ export function AnalysisPage() {
   }
 
   return <div className="general-analysis">
+    <SlaScenario book={book} disabled={!!busy}
+      renderSource={(report, group) => <SourceRows key={`${report.id}:${group}`} report={report} group={group} />} />
     <div className="import-layout">
       <section className="panel" aria-labelledby="analysis-question-title">
         <div className="panel-heading"><div><h2 id="analysis-question-title">用一句话提问</h2>
