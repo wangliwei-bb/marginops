@@ -3,7 +3,7 @@ import { resolve } from "node:path";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { z } from "zod";
 import { caseIds } from "../shared/contracts.ts";
-import { businessLedger, caseView, evidenceFor } from "./data.ts";
+import { businessLedger, caseView, evidenceFor, productPerformance } from "./data.ts";
 import { configuredModels } from "./models.ts";
 import type { AgentModels } from "./models.ts";
 import { openStore } from "./store.ts";
@@ -16,17 +16,20 @@ function json(res: ServerResponse, status: number, body: unknown) {
 
 async function body(req: IncomingMessage): Promise<unknown> {
   if (!req.headers["content-type"]?.toLowerCase().startsWith("application/json")) return null;
-  let content = "";
+  const chunks: Buffer[] = [];
+  let size = 0;
   for await (const chunk of req.iterator({ destroyOnReturn: false })) {
-    content += String(chunk);
-    if (content.length > 2048) return null;
+    size += chunk.length;
+    if (size > 2048) return null;
+    chunks.push(chunk);
   }
-  try { return JSON.parse(content); } catch { return null; }
+  try { return JSON.parse(Buffer.concat(chunks).toString("utf8")); } catch { return null; }
 }
 
 const caseSchema = z.enum(caseIds);
 const createSchema = z.object({ caseId: caseSchema });
 const decisionSchema = z.object({ decision: z.enum(["approved", "rejected"]) });
+const taskUpdateSchema = z.object({ stage: z.enum(["in_progress", "completed"]), note: z.string().trim().min(1).max(240) });
 
 export function createApi({
   dbPath = process.env.MARGINOPS_DB_PATH ?? resolve(".marginops", "runs.sqlite"),
@@ -75,7 +78,8 @@ export function createApi({
   }
 
   async function handle(req: IncomingMessage, res: ServerResponse): Promise<boolean> {
-    const path = new URL(req.url ?? "/", "http://localhost").pathname;
+    const url = new URL(req.url ?? "/", "http://localhost");
+    const path = url.pathname;
     if (!path.startsWith("/api/")) return false;
     try {
       if (req.method === "POST" &&
@@ -88,6 +92,23 @@ export function createApi({
         const id = caseSchema.safeParse(path.split("/")[3]);
         if (id.success) json(res, 200, businessLedger(id.data));
         else json(res, 404, { error: "未找到该案例的业务流水。" });
+      } else if (req.method === "GET" && /^\/api\/cases\/[^/]+\/products$/.test(path)) {
+        const id = caseSchema.safeParse(path.split("/")[3]);
+        const products = id.success && productPerformance(id.data, url.searchParams.get("channel"));
+        if (products) json(res, 200, products);
+        else json(res, 404, { error: "未找到该案例或渠道的商品数据。" });
+      } else if (req.method === "GET" && path === "/api/tasks") {
+        json(res, 200, store.listTasks());
+      } else if (req.method === "POST" && /^\/api\/tasks\/[a-f0-9-]{36}$/.test(path)) {
+        const input = taskUpdateSchema.safeParse(await body(req));
+        if (!input.success) {
+          json(res, 400, { error: "请填写 1–240 字的执行记录或复盘结论。" });
+        } else {
+          const outcome = store.updateTask(path.split("/")[3], input.data.stage, input.data.note);
+          if (outcome.result === "missing") json(res, 404, { error: "未找到已批准的处置任务。" });
+          else if (outcome.result === "conflict") json(res, 409, { error: "任务状态已更新，请查看最新进展。" });
+          else json(res, 200, outcome.task);
+        }
       } else if (req.method === "POST" && path === "/api/runs") {
         const input = createSchema.safeParse(await body(req));
         if (!input.success) {

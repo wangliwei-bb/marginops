@@ -1,5 +1,5 @@
 import { caseIds, contribution, drivers } from "../shared/contracts.ts";
-import type { BusinessLedger, CaseId, CaseView, Driver, Evidence, LedgerAmounts, Period, Role, Transaction } from "../shared/contracts.ts";
+import type { BusinessLedger, CaseId, CaseView, Driver, Evidence, LedgerAmounts, Period, ProductPerformance, Role, Transaction } from "../shared/contracts.ts";
 import { generateTransactions, periodDates } from "./transactions.ts";
 import type { ChannelSeed } from "./transactions.ts";
 
@@ -91,6 +91,24 @@ export function businessLedger(id: CaseId): BusinessLedger {
       name, amounts: byPeriod(rows.filter((row) => row.channel === name)),
     })),
   };
+}
+
+export function productPerformance(id: CaseId, channel: string | null) {
+  const channels = scenarios[id].channels.map(([name]) => name);
+  if (channel !== null && !channels.includes(channel)) return null;
+  const products = new Map<string, ProductPerformance>();
+  for (const { product, metric, period, amount, channel: source } of transactions.get(id)!) {
+    if (!product || (channel && source !== channel) || metric === "ads" || metric === "fees") continue;
+    let row = products.get(product.sku);
+    if (!row) {
+      row = { ...product, amounts: {
+        previous: { sales: 0, refunds: 0, cogs: 0 }, current: { sales: 0, refunds: 0, cogs: 0 },
+      } };
+      products.set(product.sku, row);
+    }
+    row.amounts[period][metric] += amount;
+  }
+  return { channels, products: [...products.values()] };
 }
 
 export function caseView(id: CaseId): CaseView {

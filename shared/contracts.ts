@@ -23,8 +23,19 @@ export interface Transaction {
   metric: Driver;
   document: string;
   orderId: string | null;
+  product: Product | null;
   description: string;
   amount: number;
+}
+
+export interface Product { sku: string; name: string }
+export type ProductAmounts = Pick<LedgerAmounts, "sales" | "refunds" | "cogs">;
+export interface ProductPerformance extends Product {
+  amounts: Record<Period, ProductAmounts>;
+}
+
+export function productProfit({ sales, refunds, cogs }: ProductAmounts) {
+  return sales - refunds - cogs;
 }
 
 export interface BusinessLedger {
@@ -101,4 +112,19 @@ export interface Run extends RunSummary {
   events: RunEvent[];
   error: string | null;
   decision: { value: Decision; at: string } | null;
+}
+
+export const taskStages = ["pending", "in_progress", "completed"] as const;
+export type TaskStage = (typeof taskStages)[number];
+
+export interface ActionTask {
+  runId: string;
+  caseId: CaseId;
+  title: string;
+  action: string;
+  owner: string;
+  measure: string;
+  stage: TaskStage;
+  createdAt: string;
+  updates: { stage: TaskStage; note: string; at: string }[];
 }

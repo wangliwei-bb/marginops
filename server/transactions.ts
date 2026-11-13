@@ -1,13 +1,13 @@
-import type { CaseId, Driver, Period, Transaction } from "../shared/contracts.ts";
+import type { CaseId, Driver, Period, Product, Transaction } from "../shared/contracts.ts";
 
 type ChannelAmounts = [sales: number, refunds: number, cogs: number, ads: number, fees: number];
 export type ChannelSeed = [name: string, previous: ChannelAmounts, current: ChannelAmounts];
 
-const products = [
-  "变频空调套装 · AC-310",
-  "洗烘组合 · WD-620",
-  "冰箱冷柜套装 · RF-480",
-  "厨电三件套 · KT-270",
+const products: Product[] = [
+  { sku: "AC-310", name: "变频空调套装" },
+  { sku: "WD-620", name: "洗烘组合" },
+  { sku: "RF-480", name: "冰箱冷柜套装" },
+  { sku: "KT-270", name: "厨电三件套" },
 ];
 
 const priorWeights = [142, 137, 151, 145, 150, 156, 119];
@@ -45,10 +45,11 @@ export function generateTransactions(caseId: CaseId, channels: ChannelSeed[], cu
         const orderWeights = Array.from({ length: count }, (_, i) => (count - i) * 3 + 10);
         const sales = distribute(salesByDay[index], orderWeights);
         const cogs = distribute(cogsByDay[index], orderWeights);
-        function transaction(metric: Driver, document: string, at: string, amount: number, description: string, orderId: string | null = null): Transaction {
+        function transaction(metric: Driver, document: string, at: string, amount: number, description: string,
+          orderId: string | null = null, product: Product | null = null): Transaction {
           return {
             id: `${metric}-${document}`, occurredAt: `${day}T${at}:00+08:00`,
-            period, channel, metric, document, orderId, amount, description,
+            period, channel, metric, document, orderId, amount, description, product,
           };
         }
         const orders = sales.flatMap((amount, i) => {
@@ -56,14 +57,14 @@ export function generateTransactions(caseId: CaseId, channels: ChannelSeed[], cu
           const item = products[(index + channelIndex + i) % products.length];
           const paidAt = `${String(9 + i).padStart(2, "0")}:${String(7 + i * 6).padStart(2, "0")}`;
           return [
-            transaction("sales", `PAY-${batch}-${i + 1}`, paidAt, amount, item, orderId),
-            transaction("cogs", `OUT-${batch}-${i + 1}`, `${14 + i}:20`, cogs[i], item, orderId),
+            transaction("sales", `PAY-${batch}-${i + 1}`, paidAt, amount, item.name, orderId, item),
+            transaction("cogs", `OUT-${batch}-${i + 1}`, `${14 + i}:20`, cogs[i], item.name, orderId, item),
           ];
         });
         return [
           ...orders,
           transaction("refunds", `RF-${batch}`, "20:35", refundsByDay[index],
-            refundReasons[(index + channelIndex) % refundReasons.length], orders[0].orderId),
+            refundReasons[(index + channelIndex) % refundReasons.length], orders[0].orderId, orders[0].product),
           transaction("ads", `ADV-${batch}`, "22:10", adsByDay[index], `${channel}广告组 · 当日消耗`),
           transaction("fees", `SET-${batch}`, "23:05", feesByDay[index], "平台服务费 · 日结批次"),
         ];

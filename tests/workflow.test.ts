@@ -5,8 +5,8 @@ import { once } from "node:events";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { caseIds } from "../shared/contracts.ts";
-import type { BusinessLedger, Run } from "../shared/contracts.ts";
+import { caseIds, productProfit } from "../shared/contracts.ts";
+import type { ActionTask, BusinessLedger, ProductPerformance, Run } from "../shared/contracts.ts";
 import { createApi } from "../server/api.ts";
 import { businessLedger, caseView, evidenceFor } from "../server/data.ts";
 import { replayModels } from "../server/models.ts";
@@ -40,6 +40,7 @@ test("each evidence figure links to source transactions in both periods", () => 
       assert(payment);
       assert.equal(row.channel, payment.channel);
       assert.equal(row.period, payment.period);
+      assert.deepEqual(row.product, payment.product);
       assert(row.occurredAt > payment.occurredAt);
       if (row.metric === "refunds") assert(row.amount <= payment.amount);
     }
@@ -107,12 +108,19 @@ test("an approval survives restart and an interrupted run becomes retryable", as
       assert.equal(first.complete(runId, report), true);
       assert.equal(first.decide(runId, "approved"), true);
       assert.equal(first.decide(runId, "rejected"), false);
+      assert.equal(first.listTasks().find((task) => task.runId === runId)?.stage, "pending");
+      assert.equal(first.updateTask(runId, "in_progress", "核对出库批次").result, "updated");
+      assert.equal(first.updateTask(runId, "completed", "复核商品成本率").result, "updated");
       pendingId = first.create("returns", "replay", evidenceFor("returns")).id;
+      assert.equal(first.updateTask(pendingId, "in_progress", "不应开始").result, "missing");
     } finally { first.close(); }
     const next = openStore(file);
     try {
       next.recover();
       assert.equal(next.read(runId)?.decision?.value, "approved");
+      const task = next.listTasks().find((item) => item.runId === runId);
+      assert.equal(task?.stage, "completed");
+      assert.deepEqual(task?.updates.map(({ note }) => note), ["核对出库批次", "复核商品成本率"]);
       assert.equal(next.read(pendingId)?.status, "failed");
       assert.equal(next.create("returns", "replay", evidenceFor("returns")).created, true);
     } finally { next.close(); }
@@ -140,6 +148,14 @@ test("API streams the report and records exactly one concurrent decision", async
   assert.equal((await send("/api/runs", { caseId: "missing" })).status, 400);
   assert.equal((await fetch(base + "/api/cases/missing/ledger")).status, 404);
   const ledger = await (await fetch(base + "/api/cases/acquisition/ledger")).json() as BusinessLedger;
+  const channel = ledger.channels[0];
+  const products = await (await fetch(base + "/api/cases/acquisition/products?channel=" + encodeURIComponent(channel.name)))
+    .json() as { products: ProductPerformance[] };
+  for (const period of ["current", "previous"] as const) {
+    assert.equal(products.products.reduce((sum, product) => sum + productProfit(product.amounts[period]), 0),
+      productProfit(channel.amounts[period]));
+  }
+  assert.equal((await fetch(base + "/api/cases/acquisition/products?channel=missing")).status, 404);
   const response = await send("/api/runs", { caseId: "acquisition" });
   assert.equal(response.status, 202);
   const created = await response.json() as Run;
@@ -149,7 +165,7 @@ test("API streams the report and records exactly one concurrent decision", async
   assert.match(await stream.text(), /"status":"review_required"/);
   const decisions = await Promise.all([
     send(path + "/decision", { decision: "approved" }),
-    send(path + "/decision", { decision: "rejected" }),
+    send(path + "/decision", { decision: "approved" }),
   ]);
   assert.deepEqual(decisions.map(({ status }) => status).sort(), [200, 409]);
   const result = await (await fetch(base + path)).json() as Run;
@@ -159,4 +175,17 @@ test("API streams the report and records exactly one concurrent decision", async
   assert.equal(ledger.transactions.filter((row) => row.period === "current" && row.channel === fact.channel && row.metric === fact.metric)
     .reduce((sum, row) => sum + row.amount, 0), fact.current);
   assert.equal(result.events.filter((event) => event.phase === "decision").length, 1);
+  const taskPath = `/api/tasks/${created.id}`;
+  const pending = await (await fetch(base + "/api/tasks")).json() as ActionTask[];
+  assert.deepEqual(pending.map((task) => [task.runId, task.stage]), [[created.id, "pending"]]);
+  assert.equal((await send(taskPath, { stage: "completed", note: "不能跳过执行" })).status, 409);
+  assert.equal((await send(taskPath, { stage: "in_progress", note: "  " })).status, 400);
+  const updates = await Promise.all([
+    send(taskPath, { stage: "in_progress", note: "  核查广告组  " }),
+    send(taskPath, { stage: "in_progress", note: "  核查广告组  " }),
+  ]);
+  assert.deepEqual(updates.map(({ status }) => status).sort(), [200, 409]);
+  const completed = await (await send(taskPath, { stage: "completed", note: "已记录验证结果" })).json() as ActionTask;
+  assert.equal(completed.stage, "completed");
+  assert.deepEqual(completed.updates.map(({ note }) => note), ["核查广告组", "已记录验证结果"]);
 });

@@ -2,10 +2,12 @@ import { StrictMode, useEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { roleNames } from "../shared/contracts.ts";
 import type { CaseId, CaseView, Decision, Evidence, Mode, Run, RunSummary, Status, Step } from "../shared/contracts.ts";
-import { request } from "./api.ts";
+import { post, request } from "./api.ts";
 import { BusinessFlow, BusinessPage } from "./business.tsx";
 import type { LedgerFocus } from "./business.tsx";
 import { money, signedMoney } from "./format.ts";
+import { ProductsPage } from "./products.tsx";
+import { TasksPage } from "./tasks.tsx";
 import "./styles.css";
 
 const signed = (value: number, digits = 1) => `${value < 0 ? "−" : value > 0 ? "+" : ""}${Math.abs(value).toFixed(digits)}`;
@@ -20,17 +22,13 @@ const stepNames: Record<Step, string> = {
 
 interface Bootstrap { mode: Mode; cases: CaseView[]; runs: RunSummary[] }
 
-function post<T>(url: string, body: unknown) {
-  return request<T>(url, {
-    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
-  });
-}
-
-type IconName = "grid" | "ledger" | "history" | "arrow" | "play" | "calendar" | "activity" | "check" | "shield";
+type IconName = "grid" | "ledger" | "product" | "tasks" | "history" | "arrow" | "play" | "calendar" | "activity" | "check" | "shield";
 function Icon({ name, size = 18 }: { name: IconName; size?: number }) {
   const paths: Record<IconName, string> = {
     grid: "M3 3h7v7H3z M14 3h7v7h-7z M3 14h7v7H3z M14 14h7v7h-7z",
     ledger: "M5 3h14v18H5z M8 7h8 M8 11h8 M8 15h3 m2 2h3",
+    product: "m12 3 8 4.5v9L12 21l-8-4.5v-9L12 3z m0 9 8-4.5M12 12 4 7.5M12 12v9",
+    tasks: "M9 5h11m-11 7h11m-11 7h11M3 5l1 1 2-2m-3 8 1 1 2-2m-3 8 1 1 2-2",
     history: "M3 12a9 9 0 1 1 2.7 6.4 M3 5v7h7 M12 7v5l3 2",
     arrow: "M5 12h14m-6-6 6 6-6 6",
     play: "m9 5 11 7-11 7z",
@@ -138,10 +136,12 @@ function EvidenceTable({ evidence, inspect }: { evidence: Evidence[]; inspect: (
   </div>;
 }
 
-function Investigation({ run, busy, decide, inspect }: {
+function Investigation({ run, busy, decide, inspect, inspectProducts, openTask }: {
   run: Run; busy: boolean; decide: (decision: Decision) => void; inspect: (fact: Evidence) => void;
+  inspectProducts: (channel: string) => void; openTask: () => void;
 }) {
   const report = run.report;
+  const lead = run.evidence.find((fact) => fact.id === report?.evidenceIds[0]);
   return <div className="analysis-grid">
     <section className="panel analysis" aria-labelledby="report-title">
       <div className="panel-heading"><div><h2 id="report-title" tabIndex={-1}>研判报告</h2><p>{run.mode === "live" ? "实时模型" : "合成案例回放"} · {stamp.format(new Date(run.createdAt))}</p></div><StatusPill status={run.status} /></div>
@@ -155,6 +155,8 @@ function Investigation({ run, busy, decide, inspect }: {
         </div>
         <h4 className="subhead">报告引用</h4>
         <EvidenceTable evidence={report.evidenceIds.flatMap((id) => run.evidence.filter((fact) => fact.id === id))} inspect={inspect} />
+        {lead && (lead.metric === "sales" || lead.metric === "refunds" || lead.metric === "cogs") &&
+          <button className="text-button report-product" onClick={() => inspectProducts(lead.channel)}>查看{lead.channel}的商品利润 →</button>}
         <details><summary>查看各 Agent 的发现</summary>
           <ul className="findings">{report.findings.map((finding) => <li key={finding.role}><strong>{roleNames[finding.role]}</strong>
             <p>{finding.summary}</p><div className="finding-sources">{run.evidence.filter((fact) => finding.evidenceIds.includes(fact.id))
@@ -164,11 +166,12 @@ function Investigation({ run, busy, decide, inspect }: {
         <div className="approval">
           <div><h4><Icon name="shield" /> 人工审批</h4><p>{run.decision
             ? `${statusNames[run.decision.value]} · ${stamp.format(new Date(run.decision.at))} · 已记入审计轨迹`
-            : "批准后记录决策，处置动作由负责人另行执行。"}</p></div>
+            : "批准后进入处置跟踪，由负责人执行并填写复盘。"}</p></div>
           {run.status === "review_required" && <div className="approval-buttons">
             <button className="button secondary" disabled={busy} onClick={() => decide("rejected")}>驳回</button>
             <button className="button primary" disabled={busy} onClick={() => decide("approved")}><Icon name="check" size={16} />批准建议</button>
           </div>}
+          {run.status === "approved" && <button className="button secondary" onClick={openTask}>查看处置任务 <Icon name="arrow" size={15} /></button>}
         </div>
       </>}
     </section>
@@ -184,14 +187,17 @@ function Investigation({ run, busy, decide, inspect }: {
   </div>;
 }
 
-const viewTitles = { dashboard: "异动研判", business: "业务流水", history: "研判记录" } as const;
+const viewTitles = { dashboard: "异动研判", business: "业务流水", products: "商品分析", tasks: "处置跟踪", history: "研判记录" } as const;
+type View = keyof typeof viewTitles;
 
 function App() {
   const [boot, setBoot] = useState<Bootstrap | null>(null);
   const [caseId, setCaseId] = useState<CaseId>("promotion");
   const [run, setRun] = useState<Run | null>(null);
-  const [view, setView] = useState<keyof typeof viewTitles>("dashboard");
-  const [ledgerFocus, setLedgerFocus] = useState<(LedgerFocus & { fromReport?: boolean }) | undefined>();
+  const [view, setView] = useState<View>("dashboard");
+  const [ledgerFocus, setLedgerFocus] = useState<(LedgerFocus & { from?: "report" | "products" }) | undefined>();
+  const [productFocus, setProductFocus] = useState({ channel: "", fromReport: false });
+  const [taskId, setTaskId] = useState<string>();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const heading = useRef<HTMLHeadingElement>(null);
@@ -226,20 +232,36 @@ function App() {
     requestAnimationFrame(() => heading.current?.focus());
   }
 
-  function openLedger(focus?: LedgerFocus & { fromReport?: boolean }) {
+  function openLedger(focus?: LedgerFocus & { from?: "report" | "products" }) {
     setLedgerFocus(focus);
     navigate("business");
+  }
+
+  function openProducts(channel = "", fromReport = false) {
+    setProductFocus({ channel, fromReport });
+    navigate("products");
+  }
+
+  function openTask(id?: string) {
+    setTaskId(id);
+    navigate("tasks");
   }
 
   function selectCase(next: CaseId) {
     setCaseId(next);
     setRun(null);
     setLedgerFocus(undefined);
+    setProductFocus({ channel: "", fromReport: false });
     setError("");
   }
 
   function focusReport() {
     requestAnimationFrame(() => document.getElementById("report-title")?.focus());
+  }
+
+  function returnToReport() {
+    navigate("dashboard");
+    focusReport();
   }
 
   async function start() {
@@ -259,8 +281,7 @@ function App() {
       const item = await request<Run>(`/api/runs/${id}`);
       setCaseId(item.caseId);
       setRun(item);
-      navigate("dashboard");
-      focusReport();
+      returnToReport();
     } catch { setError("无法打开该研判记录。"); }
     finally { setBusy(false); }
   }
@@ -283,6 +304,8 @@ function App() {
       <nav aria-label="主导航">
         <button onClick={() => navigate("dashboard")} aria-current={view === "dashboard" ? "page" : undefined}><Icon name="grid" />异动研判</button>
         <button onClick={() => openLedger()} aria-current={view === "business" ? "page" : undefined}><Icon name="ledger" />业务流水</button>
+        <button onClick={() => openProducts()} aria-current={view === "products" ? "page" : undefined}><Icon name="product" />商品分析</button>
+        <button onClick={() => openTask()} aria-current={view === "tasks" ? "page" : undefined}><Icon name="tasks" />处置跟踪</button>
         <button onClick={() => navigate("history")} aria-current={view === "history" ? "page" : undefined}><Icon name="history" />研判记录</button>
       </nav>
       <div className="sidebar-foot"><span aria-hidden="true" />{boot?.mode === "live" ? "实时模型模式" : "合成案例回放"}</div>
@@ -291,8 +314,8 @@ function App() {
       <header className="topbar">
         <h1 ref={heading} tabIndex={-1}>{viewTitles[view]}</h1>
         {view === "dashboard" && scenario && <div className="date"><Icon name="calendar" size={16} />{scenario.range}</div>}
-        {view === "business" && scenario && <div className="case-select">
-          <select aria-label="流水所属案例" value={caseId} disabled={busy}
+        {(view === "business" || view === "products") && scenario && <div className="case-select">
+          <select aria-label="所属案例" value={caseId} disabled={busy}
             onChange={(event) => selectCase(event.target.value as CaseId)}>
             {boot?.cases.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
           </select>
@@ -320,18 +343,27 @@ function App() {
           <BusinessFlow scenario={scenario} open={openLedger} />
           {run && <p className="sr-only" role="status">{statusNames[run.status]}</p>}
           {run && <Investigation run={run} busy={busy} decide={(decision) => void decide(decision)}
-            inspect={({ channel, metric }) => openLedger({ channel, metric, fromReport: true })} />}
+            inspect={({ channel, metric }) => openLedger({ channel, metric, from: "report" })}
+            inspectProducts={(channel) => openProducts(channel, true)} openTask={() => openTask(run.id)} />}
           <div className="chart-grid"><Trend scenario={scenario} /><Bridge scenario={scenario} /></div>
           <footer>数据周期 {scenario.range} <span>·</span> 对比周期 {scenario.previousRange} <span>·</span> 合成账本</footer>
         </>}
         {view === "business" && scenario && <>
-          <BusinessPage key={`${caseId}:${ledgerFocus?.channel ?? ""}:${ledgerFocus?.metric ?? ""}`}
-            scenario={scenario} focus={ledgerFocus} backToReport={ledgerFocus?.fromReport && run ? () => {
-              navigate("dashboard");
-              focusReport();
-            } : undefined} />
+          <BusinessPage key={`${caseId}:${ledgerFocus?.channel ?? ""}:${ledgerFocus?.metric ?? ""}:${ledgerFocus?.sku ?? ""}`}
+            scenario={scenario} focus={ledgerFocus} back={ledgerFocus?.from === "products"
+              ? { label: "返回商品分析", open: () => navigate("products") }
+              : ledgerFocus?.from === "report" && run ? { label: "返回研判报告", open: returnToReport } : undefined} />
           <footer>数据周期 {scenario.range} <span>·</span> 对比周期 {scenario.previousRange} <span>·</span> 合成业务流水</footer>
         </>}
+        {view === "products" && scenario && <>
+          {productFocus.fromReport && run && <button className="text-button report-back" onClick={returnToReport}>← 返回研判报告</button>}
+          <ProductsPage key={caseId} caseId={caseId} channel={productFocus.channel}
+            selectChannel={(channel) => setProductFocus((current) => ({ ...current, channel }))}
+            inspect={(focus) => openLedger({ ...focus, from: "products" })} />
+          <footer>数据周期 {scenario.range} <span>·</span> 对比周期 {scenario.previousRange} <span>·</span> 合成业务流水</footer>
+        </>}
+        {view === "tasks" && boot && <TasksPage key={taskId ?? "all"} cases={boot.cases} focusId={taskId}
+          openReport={(id) => void openRun(id)} />}
         {view === "history" && boot && <section className="panel history" aria-labelledby="history-title">
           <div className="panel-heading"><div><h2 id="history-title">近期研判</h2><p>查看报告、决策和审计事件</p></div><Icon name="history" /></div>
           {boot.runs.length === 0 ? <p className="empty">还没有研判记录。</p> :

@@ -7,6 +7,7 @@ import { money, signedMoney } from "./format.ts";
 export interface LedgerFocus {
   channel?: string;
   metric?: Driver;
+  sku?: string;
 }
 
 const operatingCosts = ({ cogs, ads, fees }: LedgerAmounts) => cogs + ads + fees;
@@ -51,7 +52,7 @@ interface Filter {
 }
 
 function initialFilter(focus?: LedgerFocus): Filter {
-  return { period: focus ? "all" : "current", channel: focus?.channel ?? "", metric: focus?.metric ?? "", query: "" };
+  return { period: focus ? "all" : "current", channel: focus?.channel ?? "", metric: focus?.metric ?? "", query: focus?.sku ?? "" };
 }
 
 const pageSize = 12;
@@ -78,8 +79,8 @@ function ChannelTable({ channels, select }: { channels: BusinessLedger["channels
   </section>;
 }
 
-export function BusinessPage({ scenario, focus, backToReport }: {
-  scenario: CaseView; focus?: LedgerFocus; backToReport?: () => void;
+export function BusinessPage({ scenario, focus, back }: {
+  scenario: CaseView; focus?: LedgerFocus; back?: { label: string; open: () => void };
 }) {
   const [filter, setFilter] = useState(() => initialFilter(focus));
   const [page, setPage] = useState(1);
@@ -110,7 +111,8 @@ export function BusinessPage({ scenario, focus, backToReport }: {
     (filter.period === "all" || row.period === filter.period) &&
     (!filter.channel || row.channel === filter.channel) &&
     (!filter.metric || row.metric === filter.metric) &&
-    (!query || [row.document, row.orderId, row.description].some((part) => part?.toLowerCase().includes(query))));
+    (!query || [row.document, row.orderId, row.description, row.product?.name, row.product?.sku]
+      .some((part) => part?.toLowerCase().includes(query))));
   const orderId = matches[0]?.orderId;
   const showOrder = orderId?.toLowerCase() === query && matches.every((row) => row.orderId === orderId);
   const pageCount = Math.max(1, Math.ceil(matches.length / pageSize));
@@ -122,7 +124,7 @@ export function BusinessPage({ scenario, focus, backToReport }: {
   }, 0);
 
   return <>
-    {backToReport && <button className="text-button report-back" onClick={backToReport}>← 返回研判报告</button>}
+    {back && <button className="text-button report-back" onClick={back.open}>← {back.label}</button>}
     {!focus && <BusinessFlow scenario={scenario} open={inspect} />}
     {!focus && data && <ChannelTable channels={data.channels} select={inspect} />}
     <section className="panel transaction-ledger" aria-labelledby="ledger-title">
@@ -169,7 +171,7 @@ export function BusinessPage({ scenario, focus, backToReport }: {
                   change({ period: "all", channel: "", metric: "", query: row.orderId ?? "" });
                   ledgerHeading.current?.focus();
                 }} aria-label={`查看订单 ${row.orderId} 的全部流水`}>{row.orderId}</button>}</td>
-                <td>{row.description}</td>
+                <td>{row.description}{row.product && <span className="row-period">{row.metric === "refunds" && `${row.product.name} · `}{row.product.sku}</span>}</td>
                 <td className={row.metric === "sales" ? "positive" : "negative"}>{signedMoney(row.metric === "sales" ? row.amount : -row.amount)}</td>
               </tr>)}</tbody>
             </table>

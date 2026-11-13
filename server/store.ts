@@ -2,7 +2,8 @@ import { randomUUID } from "node:crypto";
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import type { CaseId, Decision, Evidence, Mode, Recommendation, Run, RunEvent, RunSummary, Status } from "../shared/contracts.ts";
+import { taskStages } from "../shared/contracts.ts";
+import type { ActionTask, CaseId, Decision, Evidence, Mode, Recommendation, Run, RunEvent, RunSummary, Status, TaskStage } from "../shared/contracts.ts";
 import type { EventInput } from "./workflow.ts";
 
 interface RunRow {
@@ -47,9 +48,29 @@ export function openStore(path: string) {
       at TEXT NOT NULL
     );
     CREATE INDEX IF NOT EXISTS events_by_run ON events(run_id, sequence);
+    CREATE TABLE IF NOT EXISTS task_updates (
+      sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+      run_id TEXT NOT NULL REFERENCES runs(id),
+      stage TEXT NOT NULL CHECK (stage IN ('in_progress', 'completed')),
+      note TEXT NOT NULL,
+      at TEXT NOT NULL,
+      UNIQUE (run_id, stage)
+    );
   `);
   const insertEvent = db.prepare("INSERT INTO events (run_id, step, phase, message, at) VALUES (?, ?, ?, ?, ?)");
   const getRow = db.prepare("SELECT * FROM runs WHERE id = ?");
+  const getUpdates = db.prepare("SELECT stage, note, at FROM task_updates WHERE run_id = ? ORDER BY sequence");
+
+  function taskFor(row: RunRow): ActionTask | null {
+    if (row.status !== "approved" || !row.report || !row.decided_at) return null;
+    const report: Recommendation = JSON.parse(row.report);
+    const updates = getUpdates.all(row.id) as unknown as ActionTask["updates"];
+    return {
+      runId: row.id, caseId: row.case_id, title: report.headline, action: report.action,
+      owner: report.owner, measure: report.measure, createdAt: row.decided_at,
+      stage: updates.at(-1)?.stage ?? "pending", updates,
+    };
+  }
 
   function transaction<T>(operation: () => T): T {
     db.exec("BEGIN IMMEDIATE");
@@ -102,6 +123,25 @@ export function openStore(path: string) {
     },
     list() {
       return (db.prepare("SELECT * FROM runs ORDER BY created_at DESC, rowid DESC LIMIT 40").all() as unknown as RunRow[]).map(summary);
+    },
+    listTasks() {
+      const rows = db.prepare("SELECT * FROM runs WHERE status = 'approved' ORDER BY decided_at DESC, rowid DESC")
+        .all() as unknown as RunRow[];
+      return rows.flatMap((row) => {
+        const task = taskFor(row);
+        return task ? [task] : [];
+      });
+    },
+    updateTask(id: string, stage: TaskStage, note: string) {
+      return transaction(() => {
+        const row = getRow.get(id) as unknown as RunRow | undefined;
+        const task = row && taskFor(row);
+        if (!task) return { result: "missing" } as const;
+        if (taskStages[taskStages.indexOf(task.stage) + 1] !== stage) return { result: "conflict" } as const;
+        db.prepare("INSERT INTO task_updates (run_id, stage, note, at) VALUES (?, ?, ?, ?)")
+          .run(id, stage, note, new Date().toISOString());
+        return { result: "updated", task: taskFor(row) } as const;
+      });
     },
     read(id: string): Run | null {
       const row = getRow.get(id) as unknown as RunRow | undefined;

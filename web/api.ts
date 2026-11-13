@@ -4,3 +4,9 @@ export async function request<T>(url: string, init?: RequestInit): Promise<T> {
   if (!response.ok) throw new Error(payload.error ?? "请求失败，请重试。");
   return payload;
 }
+
+export function post<T>(url: string, body: unknown) {
+  return request<T>(url, {
+    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
+  });
+}
