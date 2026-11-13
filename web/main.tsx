@@ -1,13 +1,14 @@
 import { StrictMode, useEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { roleNames } from "../shared/contracts.ts";
-import type { CaseId, CaseView, Decision, Evidence, Mode, Run, RunSummary, Status, Step } from "../shared/contracts.ts";
+import type { CaseId, CaseView, Decision, Evidence, ImportResult, Mode, Run, RunSummary, Status, Step } from "../shared/contracts.ts";
 import { post, request } from "./api.ts";
 import { BusinessFlow, BusinessPage } from "./business.tsx";
 import type { LedgerFocus } from "./business.tsx";
 import { money, signedMoney } from "./format.ts";
 import { ProductsPage } from "./products.tsx";
 import { TasksPage } from "./tasks.tsx";
+import { ImportPage } from "./import.tsx";
 import "./styles.css";
 
 const signed = (value: number, digits = 1) => `${value < 0 ? "−" : value > 0 ? "+" : ""}${Math.abs(value).toFixed(digits)}`;
@@ -22,13 +23,14 @@ const stepNames: Record<Step, string> = {
 
 interface Bootstrap { mode: Mode; cases: CaseView[]; runs: RunSummary[] }
 
-type IconName = "grid" | "ledger" | "product" | "tasks" | "history" | "arrow" | "play" | "calendar" | "activity" | "check" | "shield";
+type IconName = "grid" | "ledger" | "product" | "tasks" | "history" | "import" | "arrow" | "play" | "calendar" | "activity" | "check" | "shield";
 function Icon({ name, size = 18 }: { name: IconName; size?: number }) {
   const paths: Record<IconName, string> = {
     grid: "M3 3h7v7H3z M14 3h7v7h-7z M3 14h7v7H3z M14 14h7v7h-7z",
     ledger: "M5 3h14v18H5z M8 7h8 M8 11h8 M8 15h3 m2 2h3",
     product: "m12 3 8 4.5v9L12 21l-8-4.5v-9L12 3z m0 9 8-4.5M12 12 4 7.5M12 12v9",
     tasks: "M9 5h11m-11 7h11m-11 7h11M3 5l1 1 2-2m-3 8 1 1 2-2m-3 8 1 1 2-2",
+    import: "M4 15v5h16v-5M12 16V4m-5 5 5-5 5 5",
     history: "M3 12a9 9 0 1 1 2.7 6.4 M3 5v7h7 M12 7v5l3 2",
     arrow: "M5 12h14m-6-6 6 6-6 6",
     play: "m9 5 11 7-11 7z",
@@ -53,7 +55,7 @@ function MetricCards({ scenario }: { scenario: CaseView }) {
   const { metrics, baseline } = scenario;
   const metricsList = [
     { name: "成交额", value: money(metrics.sales), delta: (metrics.sales / baseline.sales - 1) * 100, unit: "%" },
-    { name: "贡献利润", value: money(metrics.contribution), delta: (metrics.contribution / baseline.contribution - 1) * 100, unit: "%" },
+    { name: "贡献利润", value: money(metrics.contribution), delta: baseline.contribution > 0 ? (metrics.contribution / baseline.contribution - 1) * 100 : null, unit: "%" },
     { name: "贡献利润率", value: `${(metrics.margin * 100).toFixed(1)}%`, delta: (metrics.margin - baseline.margin) * 100, unit: " pp" },
     { name: "退款额占比", value: `${(metrics.refundRate * 100).toFixed(1)}%`, delta: (metrics.refundRate - baseline.refundRate) * 100, unit: " pp", inverse: true },
   ];
@@ -61,8 +63,8 @@ function MetricCards({ scenario }: { scenario: CaseView }) {
     {metricsList.map(({ name, value, delta, unit, inverse }) => <div className="metric" key={name}>
       <div className="metric-label">{name}</div>
       <strong className="metric-value">{value}</strong>
-      <div className="metric-change"><span className={(inverse ? -delta : delta) >= 0 ? "positive" : "negative"}>
-        {signed(delta)}{unit}</span><span>较上期</span></div>
+      <div className="metric-change"><span className={(inverse ? -(delta ?? 0) : delta ?? metrics.contribution - baseline.contribution) >= 0 ? "positive" : "negative"}>
+        {delta === null ? signedMoney(metrics.contribution - baseline.contribution) : `${signed(delta)}${unit}`}</span><span>较上期</span></div>
     </div>)}
   </section>;
 }
@@ -70,9 +72,14 @@ function MetricCards({ scenario }: { scenario: CaseView }) {
 function Trend({ scenario }: { scenario: CaseView }) {
   const chart = { left: 48, right: 590, top: 16, bottom: 171 };
   const { daily } = scenario;
-  const cap = Math.ceil(Math.max(...daily.flatMap((day) => [day.current, day.previous])) / 5000) * 5000;
-  const x = (index: number) => chart.left + (chart.right - chart.left) * index / (daily.length - 1);
-  const y = (value: number) => chart.bottom - (chart.bottom - chart.top) * value / cap;
+  const values = daily.flatMap((day) => [day.current, day.previous]);
+  const high = Math.max(0, ...values);
+  const low = Math.min(0, ...values);
+  const unit = 10 ** Math.floor(Math.log10(Math.max(1, high - low)) - 0.3);
+  const cap = Math.max(unit, Math.ceil(high / unit) * unit);
+  const floor = Math.floor(low / unit) * unit;
+  const x = (index: number) => daily.length === 1 ? (chart.left + chart.right) / 2 : chart.left + (chart.right - chart.left) * index / (daily.length - 1);
+  const y = (value: number) => chart.bottom - (chart.bottom - chart.top) * (value - floor) / (cap - floor);
   const points = (series: "current" | "previous") => daily.map((day, index) => `${x(index)},${y(day[series])}`).join(" ");
   return <section className="panel trend" aria-labelledby="trend-title">
     <div className="panel-heading">
@@ -81,33 +88,35 @@ function Trend({ scenario }: { scenario: CaseView }) {
     </div>
     <svg className="trend-chart" viewBox="0 0 610 202" role="img" aria-label={`本期总贡献利润 ${money(scenario.metrics.contribution)}，上期 ${money(scenario.baseline.contribution)}`}>
       {[0, 1, 2, 3].map((tick) => {
-        const value = cap * tick / 3;
+        const value = floor + (cap - floor) * tick / 3;
         return <g key={tick}>
           <line x1={chart.left} x2={chart.right} y1={y(value)} y2={y(value)} stroke="#e6e9e3" />
-          <text x={0} y={y(value) + 4}>{value ? `${(value / 1000).toFixed(1)}k` : "0"}</text>
+          <text x={0} y={y(value) + 4}>{Math.abs(value) >= 1000 ? `${(value / 1000).toFixed(1)}k` : Number(value.toFixed(1))}</text>
         </g>;
       })}
-      <polygon points={`${chart.left},${chart.bottom} ${points("current")} ${chart.right},${chart.bottom}`} fill="#eaf3e8" />
+      <polygon points={`${x(0)},${y(0)} ${points("current")} ${x(daily.length - 1)},${y(0)}`} fill="#eaf3e8" />
       <polyline points={points("previous")} stroke="#818d83" strokeWidth="2" strokeDasharray="6 5" fill="none" />
       <polyline points={points("current")} stroke="#337347" strokeWidth="2.7" strokeLinejoin="round" fill="none" />
       {daily.map((day, i) => <g key={day.day}>
+        {daily.length === 1 && <circle cx={x(i)} cy={y(day.previous)} r="4.5" fill="#818d83" />}
         <circle cx={x(i)} cy={y(day.current)} r="3.6" fill="#fff" stroke="#337347" strokeWidth="2">
-          <title>{day.day} · 本期 {money(day.current)} · 上期 {money(day.previous)}</title>
+          <title>本期 {day.day} {money(day.current)} · 上期 {day.previousDay} {money(day.previous)}</title>
         </circle>
-        <text x={x(i)} y={195} textAnchor="middle">{day.day}</text>
+        {(i % Math.ceil(daily.length / 7) === 0 || i === daily.length - 1) &&
+          <text x={x(i)} y={195} textAnchor="middle">{day.day}</text>}
       </g>)}
     </svg>
     <details className="chart-data">
       <summary>查看日度数据</summary>
-      <table><thead><tr><th>本期日期</th><th>本期贡献利润</th><th>上期同期</th></tr></thead>
-        <tbody>{daily.map((row) => <tr key={row.day}><td>{row.day}</td><td>{money(row.current)}</td><td>{money(row.previous)}</td></tr>)}</tbody>
+      <table><thead><tr><th>本期日期</th><th>本期贡献利润</th><th>上期日期</th><th>上期贡献利润</th></tr></thead>
+        <tbody>{daily.map((row) => <tr key={row.day}><td>{row.day}</td><td>{money(row.current)}</td><td>{row.previousDay}</td><td>{money(row.previous)}</td></tr>)}</tbody>
       </table>
     </details>
   </section>;
 }
 
 function Bridge({ scenario }: { scenario: CaseView }) {
-  const max = Math.max(...scenario.bridge.map((item) => Math.abs(item.impact)));
+  const max = Math.max(1, ...scenario.bridge.map((item) => Math.abs(item.impact)));
   const net = scenario.metrics.contribution - scenario.baseline.contribution;
   return <section className="panel bridge" aria-labelledby="bridge-title">
     <div className="panel-heading"><div><h2 id="bridge-title">利润变动分解</h2><p>各科目对本期利润的影响</p></div><Icon name="activity" /></div>
@@ -144,7 +153,7 @@ function Investigation({ run, busy, decide, inspect, inspectProducts, openTask }
   const lead = run.evidence.find((fact) => fact.id === report?.evidenceIds[0]);
   return <div className="analysis-grid">
     <section className="panel analysis" aria-labelledby="report-title">
-      <div className="panel-heading"><div><h2 id="report-title" tabIndex={-1}>研判报告</h2><p>{run.mode === "live" ? "实时模型" : "合成案例回放"} · {stamp.format(new Date(run.createdAt))}</p></div><StatusPill status={run.status} /></div>
+      <div className="panel-heading"><div><h2 id="report-title" tabIndex={-1}>研判报告</h2><p>{run.mode === "live" ? "实时模型" : run.caseId.startsWith("import-") ? "本地规则研判" : "合成案例回放"} · {stamp.format(new Date(run.createdAt))}</p></div><StatusPill status={run.status} /></div>
       {run.error && <p className="error-box" role="alert">{run.error}</p>}
       {run.status === "running" && <p className="report-wait"><span className="spinner" /> 正在调查渠道证据并交叉审阅。</p>}
       {report && <>
@@ -187,7 +196,7 @@ function Investigation({ run, busy, decide, inspect, inspectProducts, openTask }
   </div>;
 }
 
-const viewTitles = { dashboard: "异动研判", business: "业务流水", products: "商品分析", tasks: "处置跟踪", history: "研判记录" } as const;
+const viewTitles = { dashboard: "异动研判", business: "业务流水", products: "商品分析", tasks: "处置跟踪", history: "研判记录", import: "数据导入" } as const;
 type View = keyof typeof viewTitles;
 
 function App() {
@@ -198,10 +207,12 @@ function App() {
   const [ledgerFocus, setLedgerFocus] = useState<(LedgerFocus & { from?: "report" | "products" }) | undefined>();
   const [productFocus, setProductFocus] = useState({ channel: "", fromReport: false });
   const [taskId, setTaskId] = useState<string>();
+  const [allowLive, setAllowLive] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const heading = useRef<HTMLHeadingElement>(null);
   const scenario = boot?.cases.find((item) => item.id === caseId);
+  const sourceLabel = scenario?.source === "excel" ? "Excel 导入" : "合成业务流水";
 
   async function bootstrap() {
     try { setBoot(await request<Bootstrap>("/api/bootstrap")); }
@@ -252,6 +263,7 @@ function App() {
     setRun(null);
     setLedgerFocus(undefined);
     setProductFocus({ channel: "", fromReport: false });
+    setAllowLive(false);
     setError("");
   }
 
@@ -264,11 +276,19 @@ function App() {
     focusReport();
   }
 
+  async function openImported({ caseId: imported }: ImportResult) {
+    const updated = await request<Bootstrap>("/api/bootstrap");
+    if (!updated.cases.some((entry) => entry.id === imported)) throw new Error("Imported case unavailable.");
+    setBoot(updated);
+    selectCase(imported);
+    navigate("dashboard");
+  }
+
   async function start() {
     setBusy(true);
     setError("");
     try {
-      setRun(await post<Run>("/api/runs", { caseId }));
+      setRun(await post<Run>("/api/runs", { caseId, allowLive }));
       focusReport();
     }
     catch (failure) { setError(failure instanceof Error ? failure.message : "发起研判失败。"); }
@@ -280,6 +300,7 @@ function App() {
     try {
       const item = await request<Run>(`/api/runs/${id}`);
       setCaseId(item.caseId);
+      setAllowLive(false);
       setRun(item);
       returnToReport();
     } catch { setError("无法打开该研判记录。"); }
@@ -307,6 +328,7 @@ function App() {
         <button onClick={() => openProducts()} aria-current={view === "products" ? "page" : undefined}><Icon name="product" />商品分析</button>
         <button onClick={() => openTask()} aria-current={view === "tasks" ? "page" : undefined}><Icon name="tasks" />处置跟踪</button>
         <button onClick={() => navigate("history")} aria-current={view === "history" ? "page" : undefined}><Icon name="history" />研判记录</button>
+        <button onClick={() => navigate("import")} aria-current={view === "import" ? "page" : undefined}><Icon name="import" />数据导入</button>
       </nav>
       <div className="sidebar-foot"><span aria-hidden="true" />{boot?.mode === "live" ? "实时模型模式" : "合成案例回放"}</div>
     </aside>
@@ -336,8 +358,14 @@ function App() {
               <h2 id="case-title">{scenario.headline}</h2>
               <p>{scenario.description}</p>
             </div>
-            <button className="button primary launch" disabled={busy || run?.status === "running"}
-              onClick={() => void start()}><Icon name="play" size={18} />{run?.status === "running" ? "研判运行中" : run ? "重新研判" : "发起多 Agent 研判"}</button>
+            <div className="launch-actions">
+              {scenario.source === "excel" && boot?.mode === "live" && <label className="live-choice">
+                <input type="checkbox" checked={allowLive} disabled={busy || run?.status === "running"}
+                  onChange={(event) => setAllowLive(event.target.checked)} />允许本次研判将案例名称、渠道名称与汇总指标发送到 OpenAI
+              </label>}
+              <button className="button primary launch" disabled={busy || run?.status === "running"}
+                onClick={() => void start()}><Icon name="play" size={18} />{run?.status === "running" ? "研判运行中" : run ? "重新研判" : "发起多 Agent 研判"}</button>
+            </div>
           </section>
           <MetricCards scenario={scenario} />
           <BusinessFlow scenario={scenario} open={openLedger} />
@@ -346,31 +374,33 @@ function App() {
             inspect={({ channel, metric }) => openLedger({ channel, metric, from: "report" })}
             inspectProducts={(channel) => openProducts(channel, true)} openTask={() => openTask(run.id)} />}
           <div className="chart-grid"><Trend scenario={scenario} /><Bridge scenario={scenario} /></div>
-          <footer>数据周期 {scenario.range} <span>·</span> 对比周期 {scenario.previousRange} <span>·</span> 合成账本</footer>
+          <footer>数据周期 {scenario.range} <span>·</span> 对比周期 {scenario.previousRange} <span>·</span> {sourceLabel}
+            {scenario.hasFees === false && <><span>·</span>未导入渠道费用</>}</footer>
         </>}
         {view === "business" && scenario && <>
           <BusinessPage key={`${caseId}:${ledgerFocus?.channel ?? ""}:${ledgerFocus?.metric ?? ""}:${ledgerFocus?.sku ?? ""}`}
             scenario={scenario} focus={ledgerFocus} back={ledgerFocus?.from === "products"
               ? { label: "返回商品分析", open: () => navigate("products") }
               : ledgerFocus?.from === "report" && run ? { label: "返回研判报告", open: returnToReport } : undefined} />
-          <footer>数据周期 {scenario.range} <span>·</span> 对比周期 {scenario.previousRange} <span>·</span> 合成业务流水</footer>
+          <footer>数据周期 {scenario.range} <span>·</span> 对比周期 {scenario.previousRange} <span>·</span> {sourceLabel}</footer>
         </>}
         {view === "products" && scenario && <>
           {productFocus.fromReport && run && <button className="text-button report-back" onClick={returnToReport}>← 返回研判报告</button>}
           <ProductsPage key={caseId} caseId={caseId} channel={productFocus.channel}
             selectChannel={(channel) => setProductFocus((current) => ({ ...current, channel }))}
             inspect={(focus) => openLedger({ ...focus, from: "products" })} />
-          <footer>数据周期 {scenario.range} <span>·</span> 对比周期 {scenario.previousRange} <span>·</span> 合成业务流水</footer>
+          <footer>数据周期 {scenario.range} <span>·</span> 对比周期 {scenario.previousRange} <span>·</span> {sourceLabel}</footer>
         </>}
         {view === "tasks" && boot && <TasksPage key={taskId ?? "all"} cases={boot.cases} focusId={taskId}
           openReport={(id) => void openRun(id)} />}
+        {view === "import" && <ImportPage openCase={openImported} />}
         {view === "history" && boot && <section className="panel history" aria-labelledby="history-title">
           <div className="panel-heading"><div><h2 id="history-title">近期研判</h2><p>查看报告、决策和审计事件</p></div><Icon name="history" /></div>
           {boot.runs.length === 0 ? <p className="empty">还没有研判记录。</p> :
             <ul className="history-list">{boot.runs.map((item) => <li key={item.id}>
               <button disabled={busy} onClick={() => void openRun(item.id)}>
                 <span><strong>{boot.cases.find((entry) => entry.id === item.caseId)?.name}</strong>
-                  <small>{stamp.format(new Date(item.createdAt))} · {item.mode === "live" ? "实时模型" : "案例回放"}</small></span>
+                  <small>{stamp.format(new Date(item.createdAt))} · {item.mode === "live" ? "实时模型" : item.caseId.startsWith("import-") ? "本地规则研判" : "案例回放"}</small></span>
                 <StatusPill status={item.status} /><Icon name="arrow" />
               </button>
             </li>)}</ul>}

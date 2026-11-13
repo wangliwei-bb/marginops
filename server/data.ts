@@ -1,5 +1,5 @@
-import { caseIds, contribution, drivers } from "../shared/contracts.ts";
-import type { BusinessLedger, CaseId, CaseView, Driver, Evidence, LedgerAmounts, Period, ProductPerformance, Role, Transaction } from "../shared/contracts.ts";
+import { caseIds, contribution, drivers, roundMoney } from "../shared/contracts.ts";
+import type { BusinessLedger, CaseId, CaseView, Driver, Evidence, LedgerAmounts, Period, ProductPerformance, Role, SampleCaseId, Transaction } from "../shared/contracts.ts";
 import { generateTransactions, periodDates } from "./transactions.ts";
 import type { ChannelSeed } from "./transactions.ts";
 
@@ -12,7 +12,7 @@ interface Scenario {
 }
 
 // Seed budgets generate source transactions. Dashboards and evidence aggregate those transactions.
-const scenarios: Record<CaseId, Scenario> = {
+const scenarios: Record<SampleCaseId, Scenario> = {
   promotion: {
     name: "大促利润下滑",
     headline: "GMV 上涨，贡献利润为何下滑？",
@@ -58,11 +58,39 @@ export const scopes: Record<Role, Driver[]> = {
   quality: ["sales", "refunds"],
 };
 
-const transactions = new Map(caseIds.map((id) => [id, generateTransactions(id, scenarios[id].channels, scenarios[id].shape)]));
+export interface CaseData {
+  id: CaseId;
+  name: string;
+  headline: string;
+  description: string;
+  source: CaseView["source"];
+  hasFees?: boolean;
+  channels: string[];
+  dates: Record<Period, string[]>;
+  transactions: Transaction[];
+}
+
+const samples = new Map(caseIds.map((id): [CaseId, CaseData] => {
+  const { channels, shape, name, headline, description } = scenarios[id];
+  return [id, { id, name, headline, description, source: "sample",
+    channels: channels.map(([channel]) => channel), dates: { current: periodDates("current"), previous: periodDates("previous") },
+    transactions: generateTransactions(id, channels, shape) }];
+}));
+
+export function sampleCase(id: CaseId) {
+  return samples.get(id);
+}
+
+function sourceFor(id: CaseId, data?: CaseData) {
+  const source = data ?? sampleCase(id);
+  if (!source || source.id !== id) throw new Error("Case data unavailable.");
+  return source;
+}
 
 function totals(rows: Transaction[]): LedgerAmounts {
   const amounts: LedgerAmounts = { sales: 0, refunds: 0, cogs: 0, ads: 0, fees: 0 };
-  for (const row of rows) amounts[row.metric] += row.amount;
+  for (const row of rows) amounts[row.metric] += Math.round(row.amount * 100);
+  for (const metric of drivers) amounts[metric] /= 100;
   return amounts;
 }
 
@@ -76,28 +104,28 @@ function byPeriod(rows: Transaction[]): Record<Period, LedgerAmounts> {
 function metrics(ledger: LedgerAmounts) {
   const { sales, refunds } = ledger;
   const profit = contribution(ledger);
-  return { sales, contribution: profit, margin: profit / sales, refundRate: refunds / sales };
+  return { sales, contribution: profit, margin: sales ? profit / sales : 0, refundRate: sales ? refunds / sales : 0 };
 }
 
 function impact(metric: Driver, previous: number, current: number) {
-  return (current - previous) * (metric === "sales" ? 1 : -1);
+  return roundMoney((current - previous) * (metric === "sales" ? 1 : -1));
 }
 
-export function businessLedger(id: CaseId): BusinessLedger {
-  const rows = transactions.get(id)!;
+export function businessLedger(id: CaseId, data?: CaseData): BusinessLedger {
+  const { transactions: rows, channels } = sourceFor(id, data);
   return {
     transactions: rows,
-    channels: scenarios[id].channels.map(([name]) => ({
+    channels: channels.map((name) => ({
       name, amounts: byPeriod(rows.filter((row) => row.channel === name)),
     })),
   };
 }
 
-export function productPerformance(id: CaseId, channel: string | null) {
-  const channels = scenarios[id].channels.map(([name]) => name);
+export function productPerformance(id: CaseId, channel: string | null, data?: CaseData) {
+  const { channels, transactions } = sourceFor(id, data);
   if (channel !== null && !channels.includes(channel)) return null;
   const products = new Map<string, ProductPerformance>();
-  for (const { product, metric, period, amount, channel: source } of transactions.get(id)!) {
+  for (const { product, metric, period, amount, channel: source } of transactions) {
     if (!product || (channel && source !== channel) || metric === "ads" || metric === "fees") continue;
     let row = products.get(product.sku);
     if (!row) {
@@ -106,26 +134,30 @@ export function productPerformance(id: CaseId, channel: string | null) {
       } };
       products.set(product.sku, row);
     }
-    row.amounts[period][metric] += amount;
+    row.amounts[period][metric] = roundMoney(row.amounts[period][metric] + amount);
   }
   return { channels, products: [...products.values()] };
 }
 
-export function caseView(id: CaseId): CaseView {
-  const { name, headline, description } = scenarios[id];
-  const rows = transactions.get(id)!;
+export function caseView(id: CaseId, data?: CaseData): CaseView {
+  const { name, headline, description, source, hasFees, dates, transactions: rows } = sourceFor(id, data);
   const amounts = byPeriod(rows);
   const { previous, current } = amounts;
   const baseline = metrics(previous);
   const actual = metrics(current);
   const dayProfit = (day: string) => contribution(totals(rows.filter((row) => row.occurredAt.startsWith(day))));
-  const previousDays = periodDates("previous");
+  const range = (days: string[]) => {
+    const first = days[0];
+    const last = days.at(-1)!;
+    if (first === last) return first.replaceAll("-", ".");
+    return `${first.replaceAll("-", ".")} – ${(first.slice(0, 4) === last.slice(0, 4) ? last.slice(5) : last).replaceAll("-", ".")}`;
+  };
   return {
-    id, name, headline, description, metrics: actual, baseline, amounts,
-    range: "2026.11.02 – 11.08",
-    previousRange: "2026.10.26 – 11.01",
-    daily: periodDates("current").map((day, index) => ({
-      day: day.slice(5).replace("-", "/"), current: dayProfit(day), previous: dayProfit(previousDays[index]),
+    id, name, headline, description, source, hasFees, metrics: actual, baseline, amounts,
+    range: range(dates.current), previousRange: range(dates.previous),
+    daily: dates.current.map((day, index) => ({
+      day: day.slice(5).replace("-", "/"), previousDay: dates.previous[index].slice(5).replace("-", "/"),
+      current: dayProfit(day), previous: dayProfit(dates.previous[index]),
     })),
     bridge: drivers.map((metric) => ({
       metric, label: labels[metric], impact: impact(metric, previous[metric], current[metric]),
@@ -133,8 +165,8 @@ export function caseView(id: CaseId): CaseView {
   };
 }
 
-export function evidenceFor(id: CaseId): Evidence[] {
-  return businessLedger(id).channels.flatMap(({ name: channel, amounts: { previous, current } }, channelIndex) =>
+export function evidenceFor(id: CaseId, data?: CaseData): Evidence[] {
+  return businessLedger(id, data).channels.flatMap(({ name: channel, amounts: { previous, current } }, channelIndex) =>
     drivers.map((metric) => ({
       id: `${metric}-${channelIndex + 1}`,
       label: labels[metric],

@@ -1,5 +1,6 @@
 export const caseIds = ["promotion", "acquisition", "returns"] as const;
-export type CaseId = (typeof caseIds)[number];
+export type SampleCaseId = (typeof caseIds)[number];
+export type CaseId = SampleCaseId | `import-${string}`;
 export const roles = ["growth", "margin", "quality"] as const;
 export type Role = (typeof roles)[number];
 export const drivers = ["sales", "refunds", "cogs", "ads", "fees"] as const;
@@ -12,8 +13,10 @@ export const transactionNames: Record<Driver, string> = {
 };
 
 export function contribution({ sales, refunds, cogs, ads, fees }: LedgerAmounts) {
-  return sales - refunds - cogs - ads - fees;
+  return roundMoney(sales - refunds - cogs - ads - fees);
 }
+
+export const roundMoney = (value: number) => Math.round(value * 100) / 100;
 
 export interface Transaction {
   id: string;
@@ -35,7 +38,26 @@ export interface ProductPerformance extends Product {
 }
 
 export function productProfit({ sales, refunds, cogs }: ProductAmounts) {
-  return sales - refunds - cogs;
+  return roundMoney(sales - refunds - cogs);
+}
+
+export const maxWorkbookBytes = 5 * 1024 * 1024;
+export const maxWorkbookRows = 20_000;
+export const maxComparisonDays = 31;
+export const workbookColumns = {
+  订单: ["订单行号", "订单号", "日期", "渠道", "SKU", "商品名称", "成交金额"],
+  退款: ["退款流水号", "订单行号", "日期", "退款金额"],
+  成本: ["成本流水号", "订单行号", "日期", "成本金额"],
+  渠道费用: ["费用流水号", "日期", "渠道", "费用类型", "费用金额"],
+} as const;
+export type WorkbookSheet = keyof typeof workbookColumns;
+export interface ImportIssue { sheet?: WorkbookSheet; row?: number; message: string }
+export interface ImportOptions { name: string; currentStart: string; previousStart: string; days: number }
+export interface ImportResult {
+  caseId: CaseId;
+  rows: Record<Period, number>;
+  outside: number;
+  hasFees: boolean;
 }
 
 export interface BusinessLedger {
@@ -69,10 +91,12 @@ export interface CaseView {
   description: string;
   range: string;
   previousRange: string;
+  source: "sample" | "excel";
+  hasFees?: boolean;
   metrics: { sales: number; contribution: number; margin: number; refundRate: number };
   baseline: CaseView["metrics"];
   amounts: Record<Period, LedgerAmounts>;
-  daily: { day: string; current: number; previous: number }[];
+  daily: { day: string; previousDay: string; current: number; previous: number }[];
   bridge: { metric: Driver; label: string; impact: number }[];
 }
 

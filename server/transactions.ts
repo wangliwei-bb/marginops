@@ -1,4 +1,4 @@
-import type { CaseId, Driver, Period, Product, Transaction } from "../shared/contracts.ts";
+import type { Driver, Period, Product, SampleCaseId, Transaction } from "../shared/contracts.ts";
 
 type ChannelAmounts = [sales: number, refunds: number, cogs: number, ads: number, fees: number];
 export type ChannelSeed = [name: string, previous: ChannelAmounts, current: ChannelAmounts];
@@ -12,14 +12,17 @@ const products: Product[] = [
 
 const priorWeights = [142, 137, 151, 145, 150, 156, 119];
 const starts: Record<Period, string> = { previous: "2026-10-26", current: "2026-11-02" };
-const caseCodes: Record<CaseId, string> = { promotion: "PR", acquisition: "AD", returns: "RT" };
+const caseCodes: Record<SampleCaseId, string> = { promotion: "PR", acquisition: "AD", returns: "RT" };
 const refundReasons = ["价保补差", "商品售后", "物流延误", "配件补偿"];
 
 export function periodDates(period: Period) {
-  const start = Date.parse(starts[period]);
-  return Array.from({ length: 7 }, (_, day) => new Date(start + day * 86_400_000).toISOString().slice(0, 10));
+  return dateRange(starts[period], 7);
 }
 
+export function dateRange(start: string, days: number) {
+  const first = Date.parse(start);
+  return Array.from({ length: days }, (_, day) => new Date(first + day * 86_400_000).toISOString().slice(0, 10));
+}
 function distribute(total: number, weights: number[]) {
   const weightSum = weights.reduce((sum, weight) => sum + weight, 0);
   let cumulative = 0;
@@ -33,7 +36,7 @@ function distribute(total: number, weights: number[]) {
   });
 }
 
-export function generateTransactions(caseId: CaseId, channels: ChannelSeed[], currentWeights: number[]): Transaction[] {
+export function generateTransactions(caseId: SampleCaseId, channels: ChannelSeed[], currentWeights: number[]): Transaction[] {
   return channels.flatMap(([channel, previous, current], channelIndex) =>
     (["previous", "current"] as const).flatMap((period) => {
       const amounts = period === "current" ? current : previous;

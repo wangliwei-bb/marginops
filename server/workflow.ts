@@ -1,5 +1,5 @@
 import { Annotation, END, START, StateGraph } from "@langchain/langgraph";
-import { roles } from "../shared/contracts.ts";
+import { roles, roundMoney } from "../shared/contracts.ts";
 import type { CaseId, CaseView, Driver, Evidence, Finding, Proposal, Recommendation, Review, Role, RunEvent } from "../shared/contracts.ts";
 import { caseView, evidenceFor, scopes } from "./data.ts";
 import { findingSchema, proposalSchema, reviewSchema, worstImpact } from "./models.ts";
@@ -23,7 +23,7 @@ const state = Annotation.Root({
 const playbook: Record<Driver, { action: string; owner: string; measure: string }> = {
   sales: { action: "按商品和入口拆分成交下滑，复核库存与流量变化。", owner: "商品运营", measure: "次周成交额与贡献利润" },
   refunds: { action: "抽样核查退款订单，按商品、履约批次和退款原因聚类。", owner: "售后运营", measure: "该渠道退款额占成交额比重" },
-  cogs: { action: "复核该渠道的高销量商品成本与商品组合，拟定下一场直播的选品调整。", owner: "直播运营 · 财务", measure: "该渠道商品成本率与单场贡献利润" },
+  cogs: { action: "复核该渠道的商品出库成本与销售组合，记录异常批次并拟定调整。", owner: "商品运营 · 财务", measure: "该渠道商品成本率与贡献利润" },
   ads: { action: "按广告组核查边际产出，拟定低效组的预算收缩方案。", owner: "投放运营", measure: "该渠道投放成本率与贡献利润" },
   fees: { action: "比对平台账单与活动费率规则，核实费用归类和异常结算。", owner: "财务运营", measure: "该渠道平台费用率" },
 };
@@ -39,7 +39,7 @@ function checkProposal(proposal: Proposal, evidence: Evidence[]): string | null 
   if (!checkReferences(proposal.evidenceIds, evidence, 3)) return "引用无效。请从输入选择真实且唯一的证据 ID。";
   const cited = evidence.find((fact) => fact.id === proposal.evidenceIds[0]);
   if (!cited || cited.metric !== proposal.driver || cited.impact !== worstImpact(evidence).impact) {
-    return "首个引用必须与主要指标匹配，且对应单个渠道最大的负向贡献。";
+    return "首个引用必须与主要指标匹配，且对应会计影响最小的渠道科目。";
   }
   if (!proposal.headline.trim() || !proposal.summary.trim() || proposal.headline.length > 100 || proposal.summary.length > 350) {
     return "请补充标题和说明，并保持简洁。";
@@ -47,10 +47,12 @@ function checkProposal(proposal: Proposal, evidence: Evidence[]): string | null 
   return null;
 }
 
-export async function investigate(caseId: CaseId, models: AgentModels, emit: (event: EventInput) => void): Promise<Recommendation> {
-  const scenario = caseView(caseId);
-  const evidence = evidenceFor(caseId);
+export function investigate(caseId: CaseId, models: AgentModels, emit: (event: EventInput) => void) {
+  return investigateCase(caseView(caseId), evidenceFor(caseId), models, emit);
+}
 
+export async function investigateCase(scenario: CaseView, evidence: Evidence[], models: AgentModels,
+  emit: (event: EventInput) => void): Promise<Recommendation> {
   function specialist(role: Role) {
     return async () => {
       emit({ step: role, phase: "started", message: "开始独立调查" });
@@ -83,7 +85,7 @@ export async function investigate(caseId: CaseId, models: AgentModels, emit: (ev
   const workflow = new StateGraph(state)
     .addNode("prepare", () => {
       const change = scenario.metrics.contribution - scenario.baseline.contribution;
-      if (evidence.reduce((sum, fact) => sum + fact.impact, 0) !== change) {
+      if (roundMoney(evidence.reduce((sum, fact) => sum + fact.impact, 0)) !== roundMoney(change)) {
         throw new Error("Contribution bridge did not reconcile.");
       }
       emit({ step: "prepare", phase: "completed", message: `已对齐两个周期，${evidence.length} 条渠道证据通过金额核对` });
@@ -120,8 +122,12 @@ export async function investigate(caseId: CaseId, models: AgentModels, emit: (ev
 
   const result = await workflow.invoke({ attempts: 0 });
   if (!result.reviewResult.approved) throw new Error("Review rejected all drafts.");
+  const action = worstImpact(evidence).impact < 0 ? playbook[result.proposal.driver] : {
+    action: "按相同口径跟踪下一周期，确认贡献利润与成本结构是否保持稳定。",
+    owner: "经营分析", measure: "下一周期贡献利润和贡献利润率",
+  };
   return {
-    ...result.proposal, ...playbook[result.proposal.driver],
+    ...result.proposal, ...action,
     reviewNote: result.reviewResult.note, attempts: result.attempts, findings: result.findings,
   };
 }

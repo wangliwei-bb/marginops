@@ -3,8 +3,9 @@ import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { taskStages } from "../shared/contracts.ts";
-import type { ActionTask, CaseId, Decision, Evidence, Mode, Recommendation, Run, RunEvent, RunSummary, Status, TaskStage } from "../shared/contracts.ts";
+import type { ActionTask, CaseId, CaseView, Decision, Evidence, Mode, Recommendation, Run, RunEvent, RunSummary, Status, TaskStage } from "../shared/contracts.ts";
 import type { EventInput } from "./workflow.ts";
+import type { CaseData } from "./data.ts";
 
 interface RunRow {
   id: string;
@@ -56,6 +57,11 @@ export function openStore(path: string) {
       at TEXT NOT NULL,
       UNIQUE (run_id, stage)
     );
+    CREATE TABLE IF NOT EXISTS imported_cases (
+      id TEXT PRIMARY KEY,
+      overview TEXT NOT NULL,
+      data TEXT NOT NULL
+    );
   `);
   const insertEvent = db.prepare("INSERT INTO events (run_id, step, phase, message, at) VALUES (?, ?, ?, ?, ?)");
   const getRow = db.prepare("SELECT * FROM runs WHERE id = ?");
@@ -104,6 +110,18 @@ export function openStore(path: string) {
 
   return {
     close: () => db.close(),
+    saveCase(data: CaseData, overview: CaseView) {
+      db.prepare("INSERT INTO imported_cases (id, overview, data) VALUES (?, ?, ?) ON CONFLICT(id) DO NOTHING")
+        .run(data.id, JSON.stringify(overview), JSON.stringify(data));
+    },
+    readCase(id: CaseId): CaseData | undefined {
+      const row = db.prepare("SELECT data FROM imported_cases WHERE id = ?").get(id);
+      return row ? JSON.parse(String(row.data)) as CaseData : undefined;
+    },
+    listCases(): CaseView[] {
+      return db.prepare("SELECT overview FROM imported_cases ORDER BY rowid DESC").all()
+        .map((row) => JSON.parse(String(row.overview)) as CaseView);
+    },
     recover() {
       const rows = db.prepare("SELECT id FROM runs WHERE status = 'running'").all() as { id: string }[];
       for (const { id } of rows) {
