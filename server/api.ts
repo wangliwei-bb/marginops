@@ -13,7 +13,8 @@ import { openStore } from "./store.ts";
 import { investigateCase } from "./workflow.ts";
 import { profileWorkbook } from "./analysis-data.ts";
 import { AnalysisClarification } from "./analysis-engine.ts";
-import { analyzeWorkbook, configuredPlanner } from "./analysis-workflow.ts";
+import { analyzeWorkbook, configuredPlanner, validateManualPlan } from "./analysis-workflow.ts";
+import { manualPlanSchema } from "./analysis-plan.ts";
 import type { AnalysisSource } from "../shared/analysis.ts";
 
 function json(res: ServerResponse, status: number, body: unknown) {
@@ -21,13 +22,13 @@ function json(res: ServerResponse, status: number, body: unknown) {
   res.end(JSON.stringify(body));
 }
 
-async function body(req: IncomingMessage): Promise<unknown> {
+async function body(req: IncomingMessage, maxBytes = 2048): Promise<unknown> {
   if (!req.headers["content-type"]?.toLowerCase().startsWith("application/json")) return null;
   const chunks: Buffer[] = [];
   let size = 0;
   for await (const chunk of req.iterator({ destroyOnReturn: false })) {
     size += chunk.length;
-    if (size > 2048) return null;
+    if (size > maxBytes) return null;
     chunks.push(chunk);
   }
   try { return JSON.parse(Buffer.concat(chunks).toString("utf8")); } catch { return null; }
@@ -42,9 +43,12 @@ const analysisUpload = z.object({
   name: z.string().trim().min(1).max(120), headerRow: z.coerce.number().int().min(1).max(30).default(1),
 });
 const analysisRequest = z.object({
-  workbookId, question: z.string().trim().min(3).max(240), sheet: z.string().min(1).max(31).optional(),
+  workbookId, question: z.string().trim().min(2).max(240), sheet: z.string().min(1).max(31).optional(),
   allowLive: z.boolean().optional(),
+  manual: manualPlanSchema.optional(),
 });
+const businessMetric = z.object({ name: z.string().trim().min(2).max(60), sheet: z.string().min(1).max(31), plan: manualPlanSchema });
+const businessProfile = z.object({ context: z.string().trim().max(1000), metrics: z.array(businessMetric).max(12) });
 const sourceRequest = z.object({ group: z.coerce.number().int().min(1), page: z.coerce.number().int().min(1).max(1000).default(1) });
 const workbookTemplates = new Map([
   ["/api/import/template", "marginops-import.xlsx"],
@@ -136,26 +140,51 @@ export function createApi({
         const book = await profileWorkbook(await workbookBody(req), options.data.name, options.data.headerRow);
         store.saveWorkbook(book);
         json(res, 200, book.summary);
+      } else if ((req.method === "GET" || req.method === "POST") && /^\/api\/analysis\/workbooks\/[a-f0-9]{64}\/profile$/.test(path)) {
+        const id = path.split("/")[4];
+        const book = store.readWorkbook(id);
+        if (!book) json(res, 404, { error: "未找到工作簿。" });
+        else if (req.method === "GET") json(res, 200, store.readBusinessProfile(id));
+        else {
+          const input = businessProfile.safeParse(await body(req, 24_576));
+          if (!input.success || new Set(input.data.metrics.map(({ name }) => name.toLowerCase())).size !== input.data.metrics.length) {
+            json(res, 400, { error: "请使用不同的指标名称，最多保存 12 个指标，业务说明限 1,000 字。" });
+          } else {
+            for (const metric of input.data.metrics) {
+              const table = book.tables.find(({ name }) => name === metric.sheet);
+              if (!table) throw new AnalysisClarification("口径所用的工作表不存在。");
+              validateManualPlan(table, metric.plan);
+            }
+            store.saveBusinessProfile(id, input.data);
+            json(res, 200, input.data);
+          }
+        }
       } else if (req.method === "GET" && path === "/api/analysis/reports") {
         const id = workbookId.safeParse(url.searchParams.get("workbookId"));
         if (!id.success) json(res, 400, { error: "请选择工作簿。" });
         else json(res, 200, store.listAnalyses(id.data));
       } else if (req.method === "POST" && path === "/api/analysis/reports") {
-        const input = analysisRequest.safeParse(await body(req));
+        const input = analysisRequest.safeParse(await body(req, 8192));
         if (!input.success) {
-          json(res, 400, { error: "请选择工作簿，并用 3–240 字写出业务问题。" });
+          json(res, 400, { error: "请选择工作簿，并用 2–240 字写出业务问题。" });
         } else if (pendingAnalyses >= 3) {
           json(res, 429, { error: "已有分析正在运行，请稍后再试。" });
         } else {
-          const { workbookId, question, sheet, allowLive } = input.data;
+          const { workbookId, question, sheet, allowLive, manual } = input.data;
           const book = store.readWorkbook(workbookId);
+          const profile = book && store.readBusinessProfile(workbookId);
+          const named = profile && !manual ? profile.metrics.find(({ name }) => name.toLowerCase() === question.toLowerCase()) : undefined;
+          const plan = manual ?? named?.plan;
           if (!book) json(res, 404, { error: "未找到工作簿。" });
-          else if (allowLive && !planner) json(res, 400, { error: "本机尚未配置实时模型。" });
+          else if (plan && !(named?.sheet ?? sheet)) json(res, 400, { error: "手动口径需要选择工作表。" });
+          else if (allowLive && !plan && !planner) json(res, 400, { error: "本机尚未配置实时模型。" });
           else {
             pendingAnalyses += 1;
             const job = (async () => {
               try {
-                const { report, sources } = await analyzeWorkbook(book, question, sheet, allowLive ? planner : undefined);
+                const useLive = !plan && allowLive;
+                const { report, sources } = await analyzeWorkbook(book, question, named?.sheet ?? sheet, useLive ? planner : undefined,
+                  { manual: plan, businessContext: useLive ? profile?.context : undefined });
                 store.saveAnalysis(report, sources);
                 json(res, 200, { report });
               } catch (error) {
@@ -242,6 +271,10 @@ export function createApi({
         }
       }
     } catch (error) {
+      if (error instanceof AnalysisClarification) {
+        json(res, 422, { error: error.message });
+        return true;
+      }
       if (error instanceof WorkbookError) {
         json(res, error.status, { error: error.message, issues: error.issues });
         return true;

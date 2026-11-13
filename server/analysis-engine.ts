@@ -9,7 +9,7 @@ type SourceRow = AnalysisSource["rows"][number];
 type Group = AnalysisGroup & { rows: SourceRow[] };
 
 const words: Record<AnalysisFilter["operator"], string> = {
-  eq: "等于", contains: "包含", gt: "大于", lt: "小于", gte: "大于等于", lte: "小于等于",
+  eq: "等于", neq: "不等于", contains: "包含", gt: "大于", lt: "小于", gte: "大于等于", lte: "小于等于",
 };
 const formatter = new Intl.NumberFormat("zh-CN", { maximumFractionDigits: 4 });
 export const formatAnalysisValue = (value: number, method: AnalysisPlan["method"]) =>
@@ -55,7 +55,7 @@ export function calculate(table: Table, plan: AnalysisPlan) {
     const position = index(filter.column);
     const text = filter.value.trim().toLowerCase();
     if (!text || text.length > 160) throw new AnalysisClarification("筛选条件为空或过长。");
-    const numeric = !["eq", "contains"].includes(filter.operator);
+    const numeric = !["eq", "neq", "contains"].includes(filter.operator);
     const target = numberValue(text);
     if (numeric && (target === null || table.columns[position].kind !== "number")) {
       throw new AnalysisClarification("大小比较需要数值列和一个有效的数字。");
@@ -77,9 +77,10 @@ export function calculate(table: Table, plan: AnalysisPlan) {
       }
       const actual = String(cell).trim().toLowerCase();
       if (filter.operator === "contains") return actual.includes(text);
-      if (dateTarget) return dayValue(cell) === dateTarget;
-      if (table.columns[position].kind === "number" && target !== null) return numberValue(cell) === target;
-      return actual === text;
+      const equal = dateTarget ? dayValue(cell) === dateTarget
+        : table.columns[position].kind === "number" && target !== null ? numberValue(cell) === target
+        : actual === text;
+      return filter.operator === "neq" ? !equal : equal;
     };
   }
 
@@ -115,7 +116,7 @@ export function calculate(table: Table, plan: AnalysisPlan) {
       const cell = row.values[metric];
       if (match) {
         const result = match(row);
-        return { ...source, use: result === null ? "excluded" : result ? "numerator" : "denominator" };
+        return { ...source, use: result === null && plan.shareBase !== "all" ? "excluded" : result ? "numerator" : "denominator" };
       }
       if (numericMethod) {
         const number = numberValue(cell);
@@ -178,8 +179,8 @@ export function calculate(table: Table, plan: AnalysisPlan) {
       ? `，在可计算的 ${available.length} 组中${plan.order === "low" ? "最低" : "最高"}${available[1].value === first.value ? "（有并列）" : ""}` : ""}。`;
   const describe = (filter: AnalysisFilter) => `${field(filter.column)} ${words[filter.operator]}「${filter.value}」`;
   const notes = [`口径：${metricLabel}${plan.group ? `，按${field(plan.group)}分组` : ""}。`];
-  if (plan.filters.length) notes.push(`筛选：${plan.filters.map(describe).join("，")}；排除 ${filteredOut} 条。`);
-  if (plan.method === "share" && plan.match) notes.push(`分子：${describe(plan.match)}的记录数；分母：该字段有值的记录数。`);
+  if (plan.filters.length) notes.push(`筛选：${plan.filters.map(describe).join("，")}；筛选字段为空的行不匹配；排除 ${filteredOut} 条。`);
+  if (plan.method === "share" && plan.match) notes.push(`分子：${describe(plan.match)}的记录数；分母：${plan.shareBase === "all" ? "筛选后的全部记录数（包括该字段为空的行）" : "筛选后该字段有值的记录数"}。`);
   if (plan.method === "ratio") notes.push(`分子为「${field(plan.metric!)}」合计，分母为「${field(plan.denominator!)}」合计；只计两列均有数值的行。`);
   if (invalidDate) notes.push(`${invalidDate} 条记录缺少相应日期精度，未进入趋势。`);
   const excluded = groups.reduce((total, item) => total + item.excluded, 0);

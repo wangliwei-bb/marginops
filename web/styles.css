@@ -270,6 +270,19 @@ details .table-scroll { margin-top: 7px; }
 .analysis-source td { white-space: normal; overflow-wrap: anywhere; min-width: 100px; max-width: 300px; }
 .general-history summary { font-weight: 700; color: var(--forest); }
 .general-history .history-list button { overflow-wrap: anywhere; }
+.analysis-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+.analysis-plan { display: grid; gap: 10px; padding: 12px; background: #eff4ec; border: 1px solid var(--border); border-radius: 8px; }
+.analysis-plan h3, #analysis-plan-title { font-size: 14px; }
+.analysis-plan-fields { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 140px), 1fr)); gap: 8px; }
+.analysis-plan label { display: grid; gap: 4px; min-width: 0; }
+.analysis-plan-section, .analysis-profile { display: grid; gap: 7px; min-width: 0; margin-top: 3px; font-size: 12px; }
+.analysis-plan-section > button, .analysis-profile > button { justify-self: start; }
+.analysis-condition { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)) auto; align-items: center; gap: 5px; }
+.analysis-condition button { white-space: nowrap; }
+.analysis-profile textarea { width: 100%; padding: 8px; border: 1px solid #c7d1c5; border-radius: 7px; resize: vertical; color: inherit; background: #f9fbf6; }
+.analysis-profile p { line-height: 1.6; }
+.saved-metrics { padding-left: 0 !important; list-style: none; }
+.saved-metrics li { display: flex; align-items: start; gap: 12px; }
 
 @media (max-width: 1100px) {
   .shell { grid-template-columns: 183px minmax(0, 1fr); }

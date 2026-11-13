@@ -21,7 +21,7 @@ export interface WorkbookSummary {
 }
 export type AnalysisMethod = "count" | "sum" | "average" | "min" | "max" | "distinct" | "share" | "ratio";
 export type TimeBucket = "day" | "month" | "year";
-export type FilterOperator = "eq" | "contains" | "gt" | "lt" | "gte" | "lte";
+export type FilterOperator = "eq" | "neq" | "contains" | "gt" | "lt" | "gte" | "lte";
 export interface AnalysisFilter { column: string; operator: FilterOperator; value: string }
 export interface AnalysisPlan {
   method: AnalysisMethod;
@@ -31,8 +31,11 @@ export interface AnalysisPlan {
   timeBucket: TimeBucket | null;
   filters: AnalysisFilter[];
   match: AnalysisFilter | null;
+  shareBase?: "nonblank" | "all";
   order: "high" | "low" | "time";
 }
+export interface BusinessMetric { name: string; sheet: string; plan: AnalysisPlan }
+export interface BusinessProfile { context: string; metrics: BusinessMetric[] }
 export const methodNames: Record<AnalysisMethod, string> = {
   count: "记录数", sum: "合计", average: "平均值", min: "最小值", max: "最大值",
   distinct: "去重计数", share: "条件占比", ratio: "两列合计之比",
@@ -54,7 +57,7 @@ export interface AnalysisReport {
   workbookId: string;
   question: string;
   createdAt: string;
-  mode: "local" | "live";
+  mode: "local" | "live" | "manual";
   sheet: string;
   plan: AnalysisPlan;
   summary: string;

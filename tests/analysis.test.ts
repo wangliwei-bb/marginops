@@ -3,7 +3,7 @@ import { once } from "node:events";
 import { readFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { test } from "node:test";
-import type { AnalysisOutcome, AnalysisSource, WorkbookSummary } from "../shared/analysis.ts";
+import type { AnalysisOutcome, AnalysisPlan, AnalysisSource, BusinessProfile, WorkbookSummary } from "../shared/analysis.ts";
 import { profileWorkbook } from "../server/analysis-data.ts";
 import { analyzeWorkbook } from "../server/analysis-workflow.ts";
 import { createApi } from "../server/api.ts";
@@ -81,4 +81,25 @@ test("uploads a generic workbook, saves reports, and exposes cited cells by row"
     [[4, 4, "included"], [7, 8, "included"], [9, null, "excluded"]]);
   const history = await (await fetch(`${base}/reports?workbookId=${book.id}`)).json();
   assert.equal(history[0].id, report.id);
+
+  const plan: AnalysisPlan = {
+    method: "share", metric: null, denominator: null, group: "B", timeBucket: null, filters: [],
+    match: { column: "E", operator: "eq", value: "延期" }, shareBase: "all", order: "high",
+  };
+  const profileUrl = `${base}/workbooks/${book.id}/profile`;
+  const save = (path: string, body: unknown) => fetch(path, { method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body) });
+  const profile: BusinessProfile = { context: "一行是一张工单", metrics: [{ name: "延期率", sheet: "服务工单", plan }] };
+  const invalid = { ...profile, metrics: [{ ...profile.metrics[0], plan: { ...plan, group: "Z" } }] };
+  assert.equal((await save(profileUrl, invalid)).status, 422);
+  assert.equal((await save(profileUrl, profile)).status, 200);
+  assert.deepEqual(await (await fetch(profileUrl)).json(), profile);
+  const named = await (await save(base + "/reports", { workbookId: book.id, question: "延期率", allowLive: true })).json() as AnalysisOutcome;
+  assert("report" in named);
+  assert.equal(named.report.mode, "manual");
+  assert.deepEqual(named.report.groups.map(({ numerator, denominator }) => [numerator, denominator]), [[1, 3], [1, 3]]);
+  const manual = await (await save(base + "/reports", { workbookId: book.id, question, sheet: "服务工单",
+    manual: { ...plan, filters: [{ column: "B", operator: "neq", value: "支持" }] } })).json() as AnalysisOutcome;
+  assert("report" in manual);
+  assert.deepEqual(manual.report.groups.map(({ label, denominator }) => [label, denominator]), [["运维", 3]]);
 });

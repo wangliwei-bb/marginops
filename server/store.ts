@@ -6,7 +6,7 @@ import { taskStages } from "../shared/contracts.ts";
 import type { ActionTask, CaseId, CaseView, Decision, Evidence, Mode, Recommendation, Run, RunEvent, RunSummary, Status, TaskStage } from "../shared/contracts.ts";
 import type { EventInput } from "./workflow.ts";
 import type { CaseData } from "./data.ts";
-import type { AnalysisReport, WorkbookSummary } from "../shared/analysis.ts";
+import type { AnalysisReport, BusinessProfile, WorkbookSummary } from "../shared/analysis.ts";
 import type { AnalysisWorkbook } from "./analysis-data.ts";
 import type { SourceIndex } from "./analysis-workflow.ts";
 
@@ -76,6 +76,10 @@ export function openStore(path: string) {
       report TEXT NOT NULL,
       sources TEXT NOT NULL
     );
+    CREATE TABLE IF NOT EXISTS analysis_business_profiles (
+      workbook_id TEXT PRIMARY KEY REFERENCES analysis_workbooks(id),
+      profile TEXT NOT NULL
+    );
     CREATE INDEX IF NOT EXISTS business_analyses_by_workbook ON business_analyses(workbook_id);
   `);
   const insertEvent = db.prepare("INSERT INTO events (run_id, step, phase, message, at) VALUES (?, ?, ?, ?, ?)");
@@ -136,6 +140,14 @@ export function openStore(path: string) {
     readWorkbook(id: string): AnalysisWorkbook | null {
       const row = db.prepare("SELECT summary, tables FROM analysis_workbooks WHERE id = ?").get(id);
       return row ? { summary: JSON.parse(String(row.summary)), tables: JSON.parse(String(row.tables)) } : null;
+    },
+    readBusinessProfile(id: string): BusinessProfile {
+      const row = db.prepare("SELECT profile FROM analysis_business_profiles WHERE workbook_id = ?").get(id);
+      return row ? JSON.parse(String(row.profile)) : { context: "", metrics: [] };
+    },
+    saveBusinessProfile(id: string, profile: BusinessProfile) {
+      db.prepare(`INSERT INTO analysis_business_profiles (workbook_id, profile) VALUES (?, ?)
+        ON CONFLICT(workbook_id) DO UPDATE SET profile = excluded.profile`).run(id, JSON.stringify(profile));
     },
     saveAnalysis(report: AnalysisReport, sources: SourceIndex) {
       db.prepare("INSERT INTO business_analyses (id, workbook_id, report, sources) VALUES (?, ?, ?, ?)")

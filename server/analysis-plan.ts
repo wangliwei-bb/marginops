@@ -4,7 +4,7 @@ import { hasValue } from "./analysis-data.ts";
 import type { Table } from "./analysis-data.ts";
 
 const filterSchema = z.object({
-  column: z.string(), operator: z.enum(["eq", "contains", "gt", "lt", "gte", "lte"]), value: z.string(),
+  column: z.string(), operator: z.enum(["eq", "neq", "contains", "gt", "lt", "gte", "lte"]), value: z.string(),
 });
 export const planSchema = z.object({
   method: z.enum(["count", "sum", "average", "min", "max", "distinct", "share", "ratio"]),
@@ -12,6 +12,7 @@ export const planSchema = z.object({
   timeBucket: z.enum(["day", "month", "year"]).nullable(), filters: z.array(filterSchema),
   match: filterSchema.nullable(), order: z.enum(["high", "low", "time"]),
 });
+export const manualPlanSchema = planSchema.extend({ shareBase: z.enum(["nonblank", "all"]).optional() });
 export const choiceSchema = z.object({ sheet: z.string().nullable(), plan: planSchema.nullable(), clarification: z.string().nullable() });
 export type PlanChoice = z.infer<typeof choiceSchema>;
 
@@ -61,12 +62,13 @@ function condition(table: Table, question: string): AnalysisFilter | null {
     };
     return column ? { column: column.id, operator: operators[threshold[1]], value: threshold[2] } : null;
   }
-  const quoted = /(?:等于|为|是|=)\s*[「“"']([^」”"']+)[」”"']/.exec(question);
-  const explicit = quoted?.[1];
+  const quoted = /(不等于|等于|为|是|!=|=)\s*[「“"']([^」”"']+)[」”"']/.exec(question);
+  const explicit = quoted?.[2];
+  const equality = quoted?.[1] === "不等于" || quoted?.[1] === "!=" ? "neq" : "eq";
   if (quoted) {
     const before = normalized(question.slice(0, quoted.index));
     const target = table.columns.filter(({ name }) => before.endsWith(normalized(name)));
-    if (target.length === 1) return { column: target[0].id, operator: "eq", value: quoted[1] };
+    if (target.length === 1) return { column: target[0].id, operator: equality, value: quoted[2] };
   }
   const matches: AnalysisFilter[] = [];
   for (const [index, column] of table.columns.entries()) {
@@ -76,14 +78,14 @@ function condition(table: Table, question: string): AnalysisFilter | null {
       const named = /^(延期|已延期|逾期|超期|超时|已超时|通过|不通过|投诉|已关闭|已完成|进行中|失败|成功|离职|留存|续约|转化)$/.test(value);
       if (explicit === value || (!explicit && named && question.includes(value) &&
           !question.includes(`未${value}`) && !question.includes(`不${value}`))) {
-        matches.push({ column: column.id, operator: "eq", value });
+        matches.push({ column: column.id, operator: equality, value });
       }
     }
   }
   if (matches.length === 1) return matches[0];
   if (quoted && !matches.length) {
     const field = best(table.columns, question.slice(0, quoted.index).split(/统计|计算|比较|筛选|仅看|只看/).at(-1)!);
-    if (field) return { column: field.id, operator: "eq", value: quoted[1] };
+    if (field) return { column: field.id, operator: equality, value: quoted[2] };
   }
   return null;
 }

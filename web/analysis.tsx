@@ -1,8 +1,9 @@
 import { useEffect, useState } from "react";
 import { columnNames, methodNames } from "../shared/analysis.ts";
-import type { AnalysisOutcome, AnalysisReport, AnalysisSource, WorkbookSummary } from "../shared/analysis.ts";
+import type { AnalysisOutcome, AnalysisPlan, AnalysisReport, AnalysisSource, BusinessProfile, WorkbookSummary } from "../shared/analysis.ts";
 import { maxWorkbookBytes } from "../shared/contracts.ts";
 import { post, request } from "./api.ts";
+import { emptyPlan, PlanEditor, planReady } from "./analysis-plan.tsx";
 
 const examples = ["按部门比较平均处理时长", "按月统计记录数", "按部门统计状态等于“延期”的记录占比"];
 const labels = { included: "参与计算", numerator: "计入分子及分母", denominator: "仅计入分母", excluded: "未参与（缺值）" };
@@ -48,7 +49,7 @@ function SourceRows({ report, group }: { report: AnalysisReport; group: number }
   </div>;
 }
 
-function Report({ report }: { report: AnalysisReport }) {
+function Report({ report, edit }: { report: AnalysisReport; edit: () => void }) {
   const [group, setGroup] = useState<number>();
   const [page, setPage] = useState(1);
   const pages = Math.ceil(report.groups.length / 10);
@@ -56,7 +57,8 @@ function Report({ report }: { report: AnalysisReport }) {
   const fractional = share || report.plan.method === "ratio";
   return <section className="panel general-report" aria-labelledby="general-report-title">
     <div className="panel-heading"><div><h2 id="general-report-title">分析报告</h2>
-      <p>{report.mode === "live" ? "实时模型规划" : "本地规则规划"} · 工作表「{report.sheet}」 · {report.matchedRows} 条匹配记录</p></div></div>
+      <p>{report.mode === "manual" ? "指定业务口径" : report.mode === "live" ? "实时模型规划" : "本地规则规划"} · 工作表「{report.sheet}」 · {report.matchedRows} 条匹配记录</p></div>
+      <button className="button secondary" onClick={edit}>修改口径</button></div>
     <h3 className="report-headline">{report.summary}</h3>
     <p className="report-summary">{report.question}</p>
     <ul className="analysis-notes">{report.notes.map((note) => <li key={note}>{note}</li>)}</ul>
@@ -93,7 +95,13 @@ export function AnalysisPage() {
   const [report, setReport] = useState<AnalysisReport>();
   const [notice, setNotice] = useState("");
   const [error, setError] = useState("");
-  const [busy, setBusy] = useState<"upload" | "analyze">();
+  const [busy, setBusy] = useState<"upload" | "analyze" | "profile">();
+  const [plan, setPlan] = useState<AnalysisPlan>();
+  const [profileResult, setProfileResult] = useState<{ id: string; value: BusinessProfile }>();
+  const [context, setContext] = useState("");
+  const [metricName, setMetricName] = useState("");
+  const [saved, setSaved] = useState("");
+  const profile = profileResult?.id === workbookId ? profileResult.value : undefined;
   const book = workbooks.find(({ id }) => id === workbookId);
   const table = book?.sheets.find(({ name }) => name === sheet) ?? (book?.sheets.length === 1 ? book.sheets[0] : undefined);
 
@@ -111,6 +119,14 @@ export function AnalysisPage() {
       .then(setHistory).catch(() => { if (!controller.signal.aborted) setError("无法读取历史分析。"); });
     return () => controller.abort();
   }, [workbookId]);
+  useEffect(() => {
+    if (!workbookId) return;
+    const controller = new AbortController();
+    void request<BusinessProfile>(`/api/analysis/workbooks/${workbookId}/profile`, { signal: controller.signal })
+      .then((value) => { setProfileResult({ id: workbookId, value }); setContext(value.context); })
+      .catch(() => { if (!controller.signal.aborted) setError("无法读取业务口径。"); });
+    return () => controller.abort();
+  }, [workbookId]);
 
   function selectWorkbook(id: string) {
     setWorkbookId(id);
@@ -119,6 +135,10 @@ export function AnalysisPage() {
     setNotice("");
     setError("");
     setAllowLive(false);
+    setPlan(undefined);
+    setContext("");
+    setMetricName("");
+    setSaved("");
   }
 
   async function upload() {
@@ -146,13 +166,37 @@ export function AnalysisPage() {
     setNotice("");
     setError("");
     try {
-      const result = await post<AnalysisOutcome>("/api/analysis/reports", { workbookId, question, sheet: sheet || undefined, allowLive });
+      const result = await post<AnalysisOutcome>("/api/analysis/reports", {
+        workbookId, question: question.trim().length >= 2 ? question.trim() : metricName.trim().length >= 2 ? metricName.trim() : "按指定口径分析",
+        sheet: (plan ? table?.name : sheet) || undefined, allowLive: !plan && allowLive, manual: plan,
+      });
       if ("report" in result) {
         setReport(result.report);
         setHistory((current) => [result.report, ...current].slice(0, 20));
       } else setNotice(result.clarification);
     } catch (failure) { setError(failure instanceof Error ? failure.message : "分析失败。"); }
     finally { setBusy(undefined); setAllowLive(false); }
+  }
+
+  async function saveProfile(next: BusinessProfile) {
+    setSaved("");
+    setError("");
+    setBusy("profile");
+    try {
+      const value = await post<BusinessProfile>(`/api/analysis/workbooks/${workbookId}/profile`, next);
+      setProfileResult({ id: workbookId, value });
+      setSaved("已保存到当前工作簿。");
+    } catch (failure) { setError(failure instanceof Error ? failure.message : "保存业务口径失败。"); }
+    finally { setBusy(undefined); }
+  }
+
+  function editReport(item: AnalysisReport) {
+    setSheet(item.sheet);
+    setQuestion(item.question);
+    setPlan(item.plan);
+    setMetricName("");
+    setNotice("");
+    requestAnimationFrame(() => document.getElementById("analysis-plan-title")?.focus());
   }
 
   return <div className="general-analysis">
@@ -169,20 +213,46 @@ export function AnalysisPage() {
             </select>
             {book && <>
               <label htmlFor="analysis-sheet">工作表</label>
-              <select id="analysis-sheet" value={sheet} onChange={(event) => setSheet(event.target.value)}>
+              <select id="analysis-sheet" value={sheet} onChange={(event) => {
+                setSheet(event.target.value);
+                if (plan) setPlan(emptyPlan);
+              }}>
                 <option value="">按问题自动选择</option>
                 {book.sheets.map(({ name, rowCount }) => <option key={name} value={name}>{name} · {rowCount} 行</option>)}
               </select>
             </>}
             <label htmlFor="analysis-question">你想弄清楚什么？</label>
-            <textarea id="analysis-question" rows={3} minLength={3} maxLength={240} required value={question}
+            <textarea id="analysis-question" rows={3} minLength={plan ? undefined : 2} maxLength={240} required={!plan} value={question}
               onChange={(event) => setQuestion(event.target.value)} placeholder="例如：按部门比较平均处理时长，哪个部门最慢？" />
             <div className="analysis-examples">{examples.map((example) =>
               <button className="text-button" key={example} type="button" onClick={() => setQuestion(example)}>{example}</button>)}</div>
-            {live && <label className="live-choice"><input type="checkbox" checked={allowLive} onChange={(event) => setAllowLive(event.target.checked)} />
-              允许本次将问题、表名、列名和字段概况发送到 OpenAI 制定分析方案</label>}
-            <button className="button primary" disabled={!book || question.trim().length < 3 || !!busy}>
-              {busy === "analyze" ? "分析中…" : "开始分析"}</button>
+            {book && <div className="analysis-actions">
+              <button type="button" className="button secondary" onClick={() => {
+                if (plan) { setPlan(undefined); return; }
+                setPlan(emptyPlan);
+                if (!sheet) setSheet(book.sheets[0].name);
+              }}>{plan ? "改用自动分析" : "手动指定口径"}</button>
+            </div>}
+            {plan && table && <>
+              <h3 id="analysis-plan-title" tabIndex={-1}>指定业务口径</h3>
+              <PlanEditor table={table} plan={plan} onChange={setPlan} />
+              <label htmlFor="analysis-metric-name">常用指标名称</label>
+              <input id="analysis-metric-name" value={metricName} maxLength={60} placeholder="例如：有效工单延期率"
+                onChange={(event) => setMetricName(event.target.value)} />
+              <button type="button" className="button secondary" disabled={!profile || metricName.trim().length < 2 || !planReady(plan, table)}
+                onClick={() => {
+                  if (!profile) return;
+                  const name = metricName.trim();
+                  void saveProfile({ context: profile.context, metrics: [
+                    ...profile.metrics.filter((metric) => metric.name.toLowerCase() !== name.toLowerCase()),
+                    { name, sheet: table.name, plan },
+                  ] });
+                }}>保存为常用指标</button>
+            </>}
+            {live && !plan && <label className="live-choice"><input type="checkbox" checked={allowLive} onChange={(event) => setAllowLive(event.target.checked)} />
+              允许本次将问题、业务说明、表名、列名和字段概况发送到 OpenAI 制定分析方案</label>}
+            <button className="button primary" disabled={!book || !!busy || (plan ? !planReady(plan, table) : question.trim().length < 2)}>
+              {busy === "analyze" ? "分析中…" : plan ? "按口径计算" : "开始分析"}</button>
           </fieldset>
         </form>
       </section>
@@ -205,15 +275,34 @@ export function AnalysisPage() {
         </details>}
         {!!book?.skipped.length && <p className="analysis-skipped">未识别为数据表：{book.skipped.join("、")}</p>}
         <p className="analysis-skipped">工作簿数据保存在本机，默认使用本地规则分析。</p>
+        {book && <details className="analysis-fields"><summary>业务说明与常用指标</summary>
+          <div className="analysis-profile">
+            <label htmlFor="analysis-context">业务说明</label>
+            <textarea id="analysis-context" rows={4} maxLength={1000} value={context} disabled={!profile || !!busy}
+              placeholder="例如：每行是一张工单。取消单不计入有效工单。SLA 指首次响应时长。"
+              onChange={(event) => { setContext(event.target.value); setSaved(""); }} />
+            <p>实时模型规划时会参考这段说明。本地模式使用下方保存的指标口径。</p>
+            <button type="button" className="button secondary" disabled={!profile || !!busy || context.trim() === profile.context}
+              onClick={() => { if (profile) void saveProfile({ ...profile, context }); }}>保存业务说明</button>
+            {!!profile?.metrics.length && <ul className="saved-metrics">{profile.metrics.map((metric) => <li key={metric.name}>
+              <button type="button" className="text-button" disabled={!!busy} onClick={() => {
+                setQuestion(metric.name); setMetricName(metric.name); setSheet(metric.sheet); setPlan(metric.plan); setNotice("");
+              }}>{metric.name}</button>
+              <button type="button" className="text-button" disabled={!!busy} aria-label={`移除常用指标 ${metric.name}`}
+                onClick={() => void saveProfile({ ...profile, metrics: profile.metrics.filter(({ name }) => name !== metric.name) })}>移除</button>
+            </li>)}</ul>}
+          </div>
+        </details>}
       </section>
     </div>
+    {saved && <p className="analysis-skipped" role="status">{saved}</p>}
     {error && <p className="error-box" role="alert">{error}</p>}
     {notice && <div className="panel analysis-clarification" role="status"><h2>还需要明确一个条件</h2><p>{notice}</p></div>}
-    {report && <Report key={report.id} report={report} />}
+    {report && <Report key={report.id} report={report} edit={() => editReport(report)} />}
     {history.some((item) => item.workbookId === workbookId) && <details className="panel general-history">
       <summary>此工作簿的历史分析</summary>
       <ul className="history-list">{history.filter((item) => item.workbookId === workbookId).map((item) => <li key={item.id}>
-        <button onClick={() => { setReport(item); setQuestion(item.question); setNotice(""); setError(""); }} disabled={!!busy}>
+        <button onClick={() => { setReport(item); setQuestion(item.question); setPlan(undefined); setSheet(item.sheet); setNotice(""); setError(""); }} disabled={!!busy}>
           <span>{item.question}<small>{item.sheet} · {new Date(item.createdAt).toLocaleString("zh-CN")}</small></span>
         </button>
       </li>)}</ul>
