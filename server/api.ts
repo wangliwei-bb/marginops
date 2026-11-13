@@ -46,6 +46,10 @@ const analysisRequest = z.object({
   allowLive: z.boolean().optional(),
 });
 const sourceRequest = z.object({ group: z.coerce.number().int().min(1), page: z.coerce.number().int().min(1).max(1000).default(1) });
+const workbookTemplates = new Map([
+  ["/api/import/template", "marginops-import.xlsx"],
+  ["/api/analysis/template", "marginops-analysis-template.xlsx"],
+]);
 
 export function createApi({
   dbPath = process.env.MARGINOPS_DB_PATH ?? resolve(".marginops", "runs.sqlite"),
@@ -115,9 +119,10 @@ export function createApi({
         json(res, 200, { mode: models.mode, cases: [
           ...caseIds.map((id) => caseView(id)), ...store.listCases(),
         ], runs: store.list() });
-      } else if (req.method === "GET" && path === "/api/import/template") {
-        const template = await readFile(resolve("public", "marginops-import.xlsx"));
-        res.writeHead(200, { "Content-Type": workbookMime, "Content-Disposition": 'attachment; filename="marginops-import.xlsx"' });
+      } else if (req.method === "GET" && workbookTemplates.has(path)) {
+        const name = workbookTemplates.get(path)!;
+        const template = await readFile(resolve("public", name));
+        res.writeHead(200, { "Content-Type": workbookMime, "Content-Disposition": `attachment; filename="${name}"` });
         res.end(template);
       } else if (req.method === "POST" && path === "/api/import") {
         const { data, result } = await importWorkbook(await workbookBody(req), Object.fromEntries(url.searchParams));

@@ -188,7 +188,8 @@ export function AnalysisPage() {
       </section>
       <section className="panel" aria-labelledby="analysis-upload-title">
         <div className="panel-heading"><div><h2 id="analysis-upload-title">上传业务 Excel</h2>
-          <p>支持 .xlsx，5 MB 以内、合计 20,000 行。先将公式粘贴为值。</p></div></div>
+          <p>支持 .xlsx，5 MB 以内、合计 20,000 行。先将公式粘贴为值。</p></div>
+          <a className="button secondary" href="/api/analysis/template" download>下载模板</a></div>
         <form className="import-form" onSubmit={(event) => { event.preventDefault(); if (!busy) void upload(); }}>
           <fieldset disabled={!!busy}>
             <label htmlFor="analysis-file">Excel 文件</label>
