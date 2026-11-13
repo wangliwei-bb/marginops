@@ -11,6 +11,10 @@ import { configuredModels, replayModels } from "./models.ts";
 import type { AgentModels } from "./models.ts";
 import { openStore } from "./store.ts";
 import { investigateCase } from "./workflow.ts";
+import { profileWorkbook } from "./analysis-data.ts";
+import { AnalysisClarification } from "./analysis-engine.ts";
+import { analyzeWorkbook, configuredPlanner } from "./analysis-workflow.ts";
+import type { AnalysisSource } from "../shared/analysis.ts";
 
 function json(res: ServerResponse, status: number, body: unknown) {
   res.writeHead(status, { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store" });
@@ -33,6 +37,15 @@ const caseSchema = z.union([z.enum(caseIds), z.templateLiteral(["import-", z.str
 const createSchema = z.object({ caseId: caseSchema, allowLive: z.boolean().optional() });
 const decisionSchema = z.object({ decision: z.enum(["approved", "rejected"]) });
 const taskUpdateSchema = z.object({ stage: z.enum(["in_progress", "completed"]), note: z.string().trim().min(1).max(240) });
+const workbookId = z.string().regex(/^[a-f0-9]{64}$/);
+const analysisUpload = z.object({
+  name: z.string().trim().min(1).max(120), headerRow: z.coerce.number().int().min(1).max(30).default(1),
+});
+const analysisRequest = z.object({
+  workbookId, question: z.string().trim().min(3).max(240), sheet: z.string().min(1).max(31).optional(),
+  allowLive: z.boolean().optional(),
+});
+const sourceRequest = z.object({ group: z.coerce.number().int().min(1), page: z.coerce.number().int().min(1).max(1000).default(1) });
 
 export function createApi({
   dbPath = process.env.MARGINOPS_DB_PATH ?? resolve(".marginops", "runs.sqlite"),
@@ -43,6 +56,8 @@ export function createApi({
   const events = new EventEmitter().setMaxListeners(0);
   const jobs = new Set<Promise<void>>();
   const local = replayModels();
+  const planner = configuredPlanner();
+  let pendingAnalyses = 0;
 
   function lookup(raw: string) {
     const id = caseSchema.safeParse(raw);
@@ -108,6 +123,60 @@ export function createApi({
         const { data, result } = await importWorkbook(await workbookBody(req), Object.fromEntries(url.searchParams));
         store.saveCase(data, caseView(data.id, data));
         json(res, 200, result);
+      } else if (req.method === "GET" && path === "/api/analysis/workbooks") {
+        json(res, 200, { workbooks: store.listWorkbooks(), live: !!planner });
+      } else if (req.method === "POST" && path === "/api/analysis/workbooks") {
+        const options = analysisUpload.safeParse(Object.fromEntries(url.searchParams));
+        if (!options.success) throw new WorkbookError([{ message: "请填写工作簿名称和有效表头行（1–30）。" }], 400);
+        const book = await profileWorkbook(await workbookBody(req), options.data.name, options.data.headerRow);
+        store.saveWorkbook(book);
+        json(res, 200, book.summary);
+      } else if (req.method === "GET" && path === "/api/analysis/reports") {
+        const id = workbookId.safeParse(url.searchParams.get("workbookId"));
+        if (!id.success) json(res, 400, { error: "请选择工作簿。" });
+        else json(res, 200, store.listAnalyses(id.data));
+      } else if (req.method === "POST" && path === "/api/analysis/reports") {
+        const input = analysisRequest.safeParse(await body(req));
+        if (!input.success) {
+          json(res, 400, { error: "请选择工作簿，并用 3–240 字写出业务问题。" });
+        } else if (pendingAnalyses >= 3) {
+          json(res, 429, { error: "已有分析正在运行，请稍后再试。" });
+        } else {
+          const { workbookId, question, sheet, allowLive } = input.data;
+          const book = store.readWorkbook(workbookId);
+          if (!book) json(res, 404, { error: "未找到工作簿。" });
+          else if (allowLive && !planner) json(res, 400, { error: "本机尚未配置实时模型。" });
+          else {
+            pendingAnalyses += 1;
+            const job = (async () => {
+              try {
+                const { report, sources } = await analyzeWorkbook(book, question, sheet, allowLive ? planner : undefined);
+                store.saveAnalysis(report, sources);
+                json(res, 200, { report });
+              } catch (error) {
+                if (error instanceof AnalysisClarification) json(res, 200, { clarification: error.message });
+                else throw error;
+              } finally { pendingAnalyses -= 1; }
+            })();
+            const settled = job.then(() => {}, () => {});
+            jobs.add(settled);
+            try { await job; } finally { jobs.delete(settled); }
+          }
+        }
+      } else if (req.method === "GET" && /^\/api\/analysis\/reports\/[a-f0-9-]{36}\/source$/.test(path)) {
+        const params = sourceRequest.safeParse(Object.fromEntries(url.searchParams));
+        const analysis = params.success && store.readAnalysis(path.split("/")[4]);
+        const table = analysis && store.readWorkbook(analysis.report.workbookId)?.tables.find(({ name }) => name === analysis.report.sheet);
+        const citations = params.success && analysis && analysis.sources[params.data.group];
+        if (!params.success) json(res, 400, { error: "请选择有效的证据分组。" });
+        else if (!table || !citations) json(res, 404, { error: "未找到此分组的源数据。" });
+        else {
+          const index = new Map(table.rows.map(({ row, values }) => [row, values]));
+          const start = (params.data.page - 1) * 20;
+          const source: AnalysisSource = { sheet: table.name, columns: table.columns, total: citations.length,
+            rows: citations.slice(start, start + 20).map(({ row, use }) => ({ row, use, values: index.get(row)! })) };
+          json(res, 200, source);
+        }
       } else if (req.method === "GET" && /^\/api\/cases\/[^/]+\/(ledger|products)$/.test(path)) {
         const [, , , id, type] = path.split("/");
         const data = lookup(id);

@@ -6,6 +6,9 @@ import { taskStages } from "../shared/contracts.ts";
 import type { ActionTask, CaseId, CaseView, Decision, Evidence, Mode, Recommendation, Run, RunEvent, RunSummary, Status, TaskStage } from "../shared/contracts.ts";
 import type { EventInput } from "./workflow.ts";
 import type { CaseData } from "./data.ts";
+import type { AnalysisReport, WorkbookSummary } from "../shared/analysis.ts";
+import type { AnalysisWorkbook } from "./analysis-data.ts";
+import type { SourceIndex } from "./analysis-workflow.ts";
 
 interface RunRow {
   id: string;
@@ -62,6 +65,18 @@ export function openStore(path: string) {
       overview TEXT NOT NULL,
       data TEXT NOT NULL
     );
+    CREATE TABLE IF NOT EXISTS analysis_workbooks (
+      id TEXT PRIMARY KEY,
+      summary TEXT NOT NULL,
+      tables TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS business_analyses (
+      id TEXT PRIMARY KEY,
+      workbook_id TEXT NOT NULL REFERENCES analysis_workbooks(id),
+      report TEXT NOT NULL,
+      sources TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS business_analyses_by_workbook ON business_analyses(workbook_id);
   `);
   const insertEvent = db.prepare("INSERT INTO events (run_id, step, phase, message, at) VALUES (?, ?, ?, ?, ?)");
   const getRow = db.prepare("SELECT * FROM runs WHERE id = ?");
@@ -110,6 +125,30 @@ export function openStore(path: string) {
 
   return {
     close: () => db.close(),
+    saveWorkbook({ summary, tables }: AnalysisWorkbook) {
+      db.prepare("INSERT INTO analysis_workbooks (id, summary, tables) VALUES (?, ?, ?) ON CONFLICT(id) DO NOTHING")
+        .run(summary.id, JSON.stringify(summary), JSON.stringify(tables));
+    },
+    listWorkbooks(): WorkbookSummary[] {
+      return db.prepare("SELECT summary FROM analysis_workbooks ORDER BY rowid DESC").all()
+        .map(({ summary }) => JSON.parse(String(summary)));
+    },
+    readWorkbook(id: string): AnalysisWorkbook | null {
+      const row = db.prepare("SELECT summary, tables FROM analysis_workbooks WHERE id = ?").get(id);
+      return row ? { summary: JSON.parse(String(row.summary)), tables: JSON.parse(String(row.tables)) } : null;
+    },
+    saveAnalysis(report: AnalysisReport, sources: SourceIndex) {
+      db.prepare("INSERT INTO business_analyses (id, workbook_id, report, sources) VALUES (?, ?, ?, ?)")
+        .run(report.id, report.workbookId, JSON.stringify(report), JSON.stringify(sources));
+    },
+    listAnalyses(workbookId: string): AnalysisReport[] {
+      return db.prepare("SELECT report FROM business_analyses WHERE workbook_id = ? ORDER BY rowid DESC LIMIT 20")
+        .all(workbookId).map(({ report }) => JSON.parse(String(report)));
+    },
+    readAnalysis(id: string): { report: AnalysisReport; sources: SourceIndex } | null {
+      const row = db.prepare("SELECT report, sources FROM business_analyses WHERE id = ?").get(id);
+      return row ? { report: JSON.parse(String(row.report)), sources: JSON.parse(String(row.sources)) } : null;
+    },
     saveCase(data: CaseData, overview: CaseView) {
       db.prepare("INSERT INTO imported_cases (id, overview, data) VALUES (?, ?, ?) ON CONFLICT(id) DO NOTHING")
         .run(data.id, JSON.stringify(overview), JSON.stringify(data));

@@ -9,6 +9,7 @@ import { money, signedMoney } from "./format.ts";
 import { ProductsPage } from "./products.tsx";
 import { TasksPage } from "./tasks.tsx";
 import { ImportPage } from "./import.tsx";
+import { AnalysisPage } from "./analysis.tsx";
 import "./styles.css";
 
 const signed = (value: number, digits = 1) => `${value < 0 ? "−" : value > 0 ? "+" : ""}${Math.abs(value).toFixed(digits)}`;
@@ -196,7 +197,7 @@ function Investigation({ run, busy, decide, inspect, inspectProducts, openTask }
   </div>;
 }
 
-const viewTitles = { dashboard: "异动研判", business: "业务流水", products: "商品分析", tasks: "处置跟踪", history: "研判记录", import: "数据导入" } as const;
+const viewTitles = { dashboard: "异动研判", business: "业务流水", products: "商品分析", tasks: "处置跟踪", history: "研判记录", import: "数据导入", analysis: "通用分析" } as const;
 type View = keyof typeof viewTitles;
 
 function App() {
@@ -329,6 +330,7 @@ function App() {
         <button onClick={() => openTask()} aria-current={view === "tasks" ? "page" : undefined}><Icon name="tasks" />处置跟踪</button>
         <button onClick={() => navigate("history")} aria-current={view === "history" ? "page" : undefined}><Icon name="history" />研判记录</button>
         <button onClick={() => navigate("import")} aria-current={view === "import" ? "page" : undefined}><Icon name="import" />数据导入</button>
+        <button onClick={() => navigate("analysis")} aria-current={view === "analysis" ? "page" : undefined}><Icon name="activity" />通用分析</button>
       </nav>
       <div className="sidebar-foot"><span aria-hidden="true" />{boot?.mode === "live" ? "实时模型模式" : "合成案例回放"}</div>
     </aside>
@@ -394,6 +396,7 @@ function App() {
         {view === "tasks" && boot && <TasksPage key={taskId ?? "all"} cases={boot.cases} focusId={taskId}
           openReport={(id) => void openRun(id)} />}
         {view === "import" && <ImportPage openCase={openImported} />}
+        {view === "analysis" && <AnalysisPage />}
         {view === "history" && boot && <section className="panel history" aria-labelledby="history-title">
           <div className="panel-heading"><div><h2 id="history-title">近期研判</h2><p>查看报告、决策和审计事件</p></div><Icon name="history" /></div>
           {boot.runs.length === 0 ? <p className="empty">还没有研判记录。</p> :

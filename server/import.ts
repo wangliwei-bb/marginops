@@ -86,6 +86,13 @@ async function checkArchive(bytes: Buffer) {
               return;
             }
           }
+          for (const match of xml.matchAll(/<(?:[\w-]+:)?row\s[^>]*?\br=["'](\d+)["']/gi)) {
+            if (Number(match[1]) > maxWorkbookRows + 1) {
+              zip.close();
+              reject(new WorkbookError([{ message: "工作表范围过大，请删除多余行列或拆分文件。" }], 413));
+              return;
+            }
+          }
           zip.readEntry();
         });
       });
@@ -118,6 +125,16 @@ function cents(value: unknown) {
   return Math.round(Number(input.replaceAll(",", "")) * 100);
 }
 
+export async function readUploadedWorkbook(bytes: Buffer, options?: { trim?: boolean }) {
+  try {
+    await checkArchive(bytes);
+    return await readWorkbook(bytes, options);
+  } catch (error) {
+    if (error instanceof WorkbookError) throw error;
+    throw new WorkbookError([{ message: "无法读取此工作簿，请在 Excel 中另存为未加密的 .xlsx 后重试。" }]);
+  }
+}
+
 export async function importWorkbook(bytes: Buffer, rawOptions: Record<string, string>) {
   const parsed = optionsSchema.safeParse(rawOptions);
   if (!parsed.success) throw new WorkbookError([{ message: "请填写案例名称、两个有效的开始日期和 1–31 天的比较周期。" }], 400);
@@ -126,14 +143,7 @@ export async function importWorkbook(bytes: Buffer, rawOptions: Record<string, s
   if (dates.previous.at(-1)! >= dates.current[0] || dates.current.some((day) => !z.iso.date().safeParse(day).success)) {
     throw new WorkbookError([{ message: "上期必须在本期之前，且两个统计周期不能重叠。" }], 400);
   }
-  let workbook: Awaited<ReturnType<typeof readWorkbook>>;
-  try {
-    await checkArchive(bytes);
-    workbook = await readWorkbook(bytes);
-  } catch (error) {
-    if (error instanceof WorkbookError) throw error;
-    throw new WorkbookError([{ message: "无法读取此工作簿，请在 Excel 中另存为未加密的 .xlsx 后重试。" }]);
-  }
+  const workbook = await readUploadedWorkbook(bytes);
 
   const issues: ImportIssue[] = [];
   const found = new Map(workbook.map(({ sheet, data }) => [sheet.trim(), data]));
