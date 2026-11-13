@@ -10,6 +10,7 @@ import { ProductsPage } from "./products.tsx";
 import { TasksPage } from "./tasks.tsx";
 import { ImportPage } from "./import.tsx";
 import { AnalysisPage } from "./analysis.tsx";
+import type { BusinessScenario } from "./analysis.tsx";
 import "./styles.css";
 
 const signed = (value: number, digits = 1) => `${value < 0 ? "−" : value > 0 ? "+" : ""}${Math.abs(value).toFixed(digits)}`;
@@ -197,14 +198,37 @@ function Investigation({ run, busy, decide, inspect, inspectProducts, openTask }
   </div>;
 }
 
-const viewTitles = { dashboard: "异动研判", business: "业务流水", products: "商品分析", tasks: "处置跟踪", history: "研判记录", import: "数据导入", analysis: "通用分析" } as const;
+const viewTitles = { home: "业务工作台", dashboard: "利润研判", business: "业务流水", products: "商品分析", tasks: "处置跟踪", history: "研判记录", import: "数据导入", analysis: "业务分析" } as const;
 type View = keyof typeof viewTitles;
+const legacyViews: View[] = ["dashboard", "business", "products", "tasks", "history", "import"];
+
+function WorkspaceHome({ open }: { open: (scenario: BusinessScenario) => void }) {
+  return <section className="workspace-home" aria-labelledby="workspace-title">
+    <div className="workspace-intro">
+      <h2 id="workspace-title">从业务数据找到下一步行动</h2>
+      <p>用 Excel 台账做周复盘，核对指标口径，沿结论追到具体工单或任务。</p>
+    </div>
+    <div className="workspace-cards">
+      <article className="panel workspace-card"><Icon name="activity" size={24} /><h3>客服 SLA 周复盘</h3>
+        <p>比较各渠道首次响应超时率，定位期末还没响应的超时工单。</p>
+        <button className="button secondary" onClick={() => open("sla")}>打开客服运营 <Icon name="arrow" size={16} /></button></article>
+      <article className="panel workspace-card"><Icon name="tasks" size={24} /><h3>项目交付周复盘</h3>
+        <p>核对团队按期交付率，找出逾期未交任务、责任人和高优先级积压。</p>
+        <button className="button secondary" onClick={() => open("delivery")}>打开项目交付 <Icon name="arrow" size={16} /></button></article>
+      <article className="panel workspace-card"><Icon name="ledger" size={24} /><h3>通用表格分析</h3>
+        <p>上传任意业务台账，提问或指定统计口径，把常用指标保存下来。</p>
+        <button className="button secondary" onClick={() => open("free")}>打开通用分析 <Icon name="arrow" size={16} /></button></article>
+    </div>
+  </section>;
+}
 
 function App() {
   const [boot, setBoot] = useState<Bootstrap | null>(null);
   const [caseId, setCaseId] = useState<CaseId>("promotion");
   const [run, setRun] = useState<Run | null>(null);
-  const [view, setView] = useState<View>("dashboard");
+  const [view, setView] = useState<View>("home");
+  const [analysisScenario, setAnalysisScenario] = useState<BusinessScenario>("free");
+  const [legacyOpen, setLegacyOpen] = useState(false);
   const [ledgerFocus, setLedgerFocus] = useState<(LedgerFocus & { from?: "report" | "products" }) | undefined>();
   const [productFocus, setProductFocus] = useState({ channel: "", fromReport: false });
   const [taskId, setTaskId] = useState<string>();
@@ -239,9 +263,15 @@ function App() {
 
   function navigate(next: typeof view) {
     setView(next);
+    if (legacyViews.includes(next)) setLegacyOpen(true);
     setError("");
     if (next === "history") void bootstrap();
     requestAnimationFrame(() => heading.current?.focus());
+  }
+
+  function openAnalysis(next: BusinessScenario) {
+    setAnalysisScenario(next);
+    navigate("analysis");
   }
 
   function openLedger(focus?: LedgerFocus & { from?: "report" | "products" }) {
@@ -322,21 +352,30 @@ function App() {
   return <div className="shell">
     <a className="skip" href="#main">跳到内容</a>
     <aside className="sidebar">
-      <div className="brand"><Mark /><div><strong>MarginOps</strong><span>电商经营分析</span></div></div>
+      <div className="brand"><Mark /><div><strong>MarginOps</strong><span>业务运营工作台</span></div></div>
       <nav aria-label="主导航">
-        <button onClick={() => navigate("dashboard")} aria-current={view === "dashboard" ? "page" : undefined}><Icon name="grid" />异动研判</button>
+        <button onClick={() => navigate("home")} aria-current={view === "home" ? "page" : undefined}><Icon name="grid" />业务工作台</button>
+        <button onClick={() => openAnalysis("sla")} aria-current={view === "analysis" && analysisScenario === "sla" ? "page" : undefined}><Icon name="activity" />客服运营</button>
+        <button onClick={() => openAnalysis("delivery")} aria-current={view === "analysis" && analysisScenario === "delivery" ? "page" : undefined}><Icon name="tasks" />项目交付</button>
+        <button onClick={() => openAnalysis("free")} aria-current={view === "analysis" && analysisScenario === "free" ? "page" : undefined}><Icon name="ledger" />通用分析</button>
+      </nav>
+      <details className="legacy-navigation" open={legacyOpen} onToggle={(event) => setLegacyOpen(event.currentTarget.open)}>
+        <summary>电商专项</summary>
+        <nav aria-label="电商专项">
+        <button onClick={() => navigate("dashboard")} aria-current={view === "dashboard" ? "page" : undefined}><Icon name="activity" />利润研判</button>
         <button onClick={() => openLedger()} aria-current={view === "business" ? "page" : undefined}><Icon name="ledger" />业务流水</button>
         <button onClick={() => openProducts()} aria-current={view === "products" ? "page" : undefined}><Icon name="product" />商品分析</button>
         <button onClick={() => openTask()} aria-current={view === "tasks" ? "page" : undefined}><Icon name="tasks" />处置跟踪</button>
         <button onClick={() => navigate("history")} aria-current={view === "history" ? "page" : undefined}><Icon name="history" />研判记录</button>
         <button onClick={() => navigate("import")} aria-current={view === "import" ? "page" : undefined}><Icon name="import" />数据导入</button>
-        <button onClick={() => navigate("analysis")} aria-current={view === "analysis" ? "page" : undefined}><Icon name="activity" />通用分析</button>
-      </nav>
-      <div className="sidebar-foot"><span aria-hidden="true" />{boot?.mode === "live" ? "实时模型模式" : "合成案例回放"}</div>
+        </nav>
+      </details>
+      <div className="sidebar-foot"><span aria-hidden="true" />{boot?.mode === "live" ? "实时模型可用" : "本地分析"}</div>
     </aside>
     <main id="main" tabIndex={-1}>
       <header className="topbar">
-        <h1 ref={heading} tabIndex={-1}>{viewTitles[view]}</h1>
+        <h1 ref={heading} tabIndex={-1}>{view === "analysis" && analysisScenario !== "free"
+          ? analysisScenario === "sla" ? "客服运营" : "项目交付" : viewTitles[view]}</h1>
         {view === "dashboard" && scenario && <div className="date"><Icon name="calendar" size={16} />{scenario.range}</div>}
         {(view === "business" || view === "products") && scenario && <div className="case-select">
           <select aria-label="所属案例" value={caseId} disabled={busy}
@@ -348,6 +387,7 @@ function App() {
       <div className="content">
         {error && <div className="error-box" role="alert">{error} {!boot && <button className="button secondary" onClick={() => void bootstrap()}>重试</button>}</div>}
         {!boot && !error && <p role="status">正在加载经营数据…</p>}
+        {view === "home" && <WorkspaceHome open={openAnalysis} />}
         {view === "dashboard" && scenario && <>
           <section className="hero" aria-labelledby="case-title">
             <div className="hero-body">
@@ -396,7 +436,7 @@ function App() {
         {view === "tasks" && boot && <TasksPage key={taskId ?? "all"} cases={boot.cases} focusId={taskId}
           openReport={(id) => void openRun(id)} />}
         {view === "import" && <ImportPage openCase={openImported} />}
-        {view === "analysis" && <AnalysisPage />}
+        {view === "analysis" && <AnalysisPage scenario={analysisScenario} />}
         {view === "history" && boot && <section className="panel history" aria-labelledby="history-title">
           <div className="panel-heading"><div><h2 id="history-title">近期研判</h2><p>查看报告、决策和审计事件</p></div><Icon name="history" /></div>
           {boot.runs.length === 0 ? <p className="empty">还没有研判记录。</p> :

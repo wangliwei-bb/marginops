@@ -1,13 +1,11 @@
-import { createHash } from "node:crypto";
 import { z } from "zod";
-import type { AnalysisCell, AnalysisPlan, AnalysisReport } from "../shared/analysis.ts";
+import type { AnalysisCell, AnalysisPlan } from "../shared/analysis.ts";
 import { slaHeaders } from "../shared/sla.ts";
 import type { SlaReview } from "../shared/sla.ts";
 import { hasValue, numberValue } from "./analysis-data.ts";
 import type { AnalysisWorkbook, Table } from "./analysis-data.ts";
 import { AnalysisClarification } from "./analysis-engine.ts";
-import { analyzeWorkbook } from "./analysis-workflow.ts";
-import type { SourceIndex } from "./analysis-workflow.ts";
+import { createReviewSnapshot, reviewKey } from "./review-snapshot.ts";
 
 const day = 86_400_000;
 const offset = "+08:00";
@@ -91,38 +89,19 @@ export async function reviewSla(book: AnalysisWorkbook, weekStart: string) {
   if (errors.length) throw new AnalysisClarification(`请修正「客服工单」：${errors.join("；")}`);
   if (!counts.current.received) throw new AnalysisClarification("本期七天内没有工单，请核对受理时间或选择其他开始日期。");
 
-  const rawColumns = table.columns.map((column, index) => {
-    const values = rows.map(({ values }) => values[index]).filter(hasValue);
-    return { ...column, filled: values.length, distinct: new Set(values).size };
-  });
-  const derived = derivedNames.map((name, index) => {
-    const values = rows.map(({ values }) => values[rawColumns.length + index]).filter(hasValue);
-    return { id: `derived-${index + 1}`, name, kind: "category" as const, filled: values.length, distinct: new Set(values).size };
-  });
-  const { name } = table;
-  const summary = { name, columns: [...rawColumns, ...derived], rowCount: rows.length };
-  const id = slaReviewKey(book.summary.id, weekStart);
-  const snapshot: AnalysisWorkbook = { summary: { ...book.summary, id, kind: "sla-snapshot", sheets: [summary], skipped: [] },
-    tables: [{ ...summary, rows }] };
-  const [period, verdict, detail] = derived.map((column) => column.id);
+  const { snapshot, reports, run, derived: [period, verdict, detail] } = createReviewSnapshot(book, table,
+    slaReviewKey(book.summary.id, weekStart), "sla-snapshot", derivedNames, rows);
   const plan = (label: string): AnalysisPlan => ({
-    method: "share", metric: null, denominator: null, group: rawColumns[indexes[4]].id, timeBucket: null, order: "high",
+    method: "share", metric: null, denominator: null, group: table.columns[indexes[4]].id, timeBucket: null, order: "high",
     filters: [{ column: period, operator: "eq", value: label }],
     match: { column: verdict, operator: "eq", value: "超时" },
   });
-  const reports: { report: AnalysisReport; sources: SourceIndex }[] = [];
-  async function run(question: string, manual: AnalysisPlan, available: boolean) {
-    if (!available) return null;
-    const result = await analyzeWorkbook(snapshot, question, name, undefined, { manual });
-    reports.push(result);
-    return result.report;
-  }
   const current = await run("本期各渠道首次响应超时率", plan("本期"),
     rows.some(({ values }) => values[periodIndex] === "本期" && values[verdictIndex] !== null));
   const previous = await run("上期各渠道首次响应超时率", plan("上期"),
     rows.some(({ values }) => values[periodIndex] === "上期" && values[verdictIndex] !== null));
   const backlog = await run("本期结束时各团队未响应超时工单", {
-    ...plan("本期"), method: "count", group: rawColumns[indexes[5]].id, match: null,
+    ...plan("本期"), method: "count", group: table.columns[indexes[5]].id, match: null,
     filters: [{ column: period, operator: "eq", value: "本期" }, { column: detail, operator: "eq", value: "未响应超时" }],
   }, rows.some(({ values }) => values[periodIndex] === "本期" && values[detailIndex] === "未响应超时"));
   const review: SlaReview = { workbookId: book.summary.id, weekStart, currentCutoff: dayLabel(currentCutoff),
@@ -131,4 +110,4 @@ export async function reviewSla(book: AnalysisWorkbook, weekStart: string) {
 }
 
 export const slaReviewKey = (workbookId: string, weekStart: string) =>
-  createHash("sha256").update(`sla-v1:${workbookId}:${weekStart}`).digest("hex");
+  reviewKey("sla-v1", workbookId, weekStart);

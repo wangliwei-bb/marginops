@@ -5,6 +5,9 @@ import { maxWorkbookBytes } from "../shared/contracts.ts";
 import { post, request } from "./api.ts";
 import { emptyPlan, PlanEditor, planReady } from "./analysis-plan.tsx";
 import { SlaScenario } from "./sla.tsx";
+import { DeliveryScenario } from "./delivery.tsx";
+
+export type BusinessScenario = "free" | "sla" | "delivery";
 
 const examples = ["按部门比较平均处理时长", "按月统计记录数", "按部门统计状态等于“延期”的记录占比"];
 const labels = { included: "参与计算", numerator: "计入分子及分母", denominator: "仅计入分母", excluded: "未参与（缺值）" };
@@ -83,7 +86,7 @@ function Report({ report, edit }: { report: AnalysisReport; edit: () => void }) 
   </section>;
 }
 
-export function AnalysisPage() {
+export function AnalysisPage({ scenario }: { scenario: BusinessScenario }) {
   const [workbooks, setWorkbooks] = useState<WorkbookSummary[]>([]);
   const [live, setLive] = useState(false);
   const [allowLive, setAllowLive] = useState(false);
@@ -201,10 +204,19 @@ export function AnalysisPage() {
   }
 
   return <div className="general-analysis">
-    <SlaScenario book={book} disabled={!!busy}
-      renderSource={(report, group) => <SourceRows key={`${report.id}:${group}`} report={report} group={group} />} />
-    <div className="import-layout">
-      <section className="panel" aria-labelledby="analysis-question-title">
+    {scenario === "sla" && <SlaScenario book={book} disabled={!!busy}
+      renderSource={(report, group) => <SourceRows key={`${report.id}:${group}`} report={report} group={group} />} />}
+    {scenario === "delivery" && <DeliveryScenario book={book} disabled={!!busy}
+      renderSource={(report, group) => <SourceRows key={`${report.id}:${group}`} report={report} group={group} />} />}
+    {scenario !== "free" && workbooks.length > 0 && <div className="panel case-select">
+      <label htmlFor="scenario-workbook">复盘工作簿</label>
+      <select id="scenario-workbook" value={workbookId} disabled={!!busy} onChange={(event) => selectWorkbook(event.target.value)}>
+        <option value="">请选择工作簿</option>
+        {workbooks.map(({ id, name }) => <option key={id} value={id}>{name}</option>)}
+      </select>
+    </div>}
+    <div className={scenario === "free" ? "import-layout" : "scenario-upload"}>
+      {scenario === "free" && <section className="panel" aria-labelledby="analysis-question-title">
         <div className="panel-heading"><div><h2 id="analysis-question-title">用一句话提问</h2>
           <p>选择或上传工作簿。系统会按问题选字段、计算指标并校验原始行引用。</p></div></div>
         <form className="import-form" onSubmit={(event) => { event.preventDefault(); if (!busy && workbookId) void analyze(); }}>
@@ -258,11 +270,11 @@ export function AnalysisPage() {
               {busy === "analyze" ? "分析中…" : plan ? "按口径计算" : "开始分析"}</button>
           </fieldset>
         </form>
-      </section>
+      </section>}
       <section className="panel" aria-labelledby="analysis-upload-title">
         <div className="panel-heading"><div><h2 id="analysis-upload-title">上传业务 Excel</h2>
           <p>支持 .xlsx，5 MB 以内、合计 20,000 行。先将公式粘贴为值。</p></div>
-          <a className="button secondary" href="/api/analysis/template" download>下载模板</a></div>
+          {scenario === "free" && <a className="button secondary" href="/api/analysis/template" download>下载模板</a>}</div>
         <form className="import-form" onSubmit={(event) => { event.preventDefault(); if (!busy) void upload(); }}>
           <fieldset disabled={!!busy}>
             <label htmlFor="analysis-file">Excel 文件</label>
@@ -278,7 +290,7 @@ export function AnalysisPage() {
         </details>}
         {!!book?.skipped.length && <p className="analysis-skipped">未识别为数据表：{book.skipped.join("、")}</p>}
         <p className="analysis-skipped">工作簿数据保存在本机，默认使用本地规则分析。</p>
-        {book && <details className="analysis-fields"><summary>业务说明与常用指标</summary>
+        {scenario === "free" && book && <details className="analysis-fields"><summary>业务说明与常用指标</summary>
           <div className="analysis-profile">
             <label htmlFor="analysis-context">业务说明</label>
             <textarea id="analysis-context" rows={4} maxLength={1000} value={context} disabled={!profile || !!busy}
@@ -300,9 +312,9 @@ export function AnalysisPage() {
     </div>
     {saved && <p className="analysis-skipped" role="status">{saved}</p>}
     {error && <p className="error-box" role="alert">{error}</p>}
-    {notice && <div className="panel analysis-clarification" role="status"><h2>还需要明确一个条件</h2><p>{notice}</p></div>}
-    {report && <Report key={report.id} report={report} edit={() => editReport(report)} />}
-    {history.some((item) => item.workbookId === workbookId) && <details className="panel general-history">
+    {scenario === "free" && notice && <div className="panel analysis-clarification" role="status"><h2>还需要明确一个条件</h2><p>{notice}</p></div>}
+    {scenario === "free" && report && <Report key={report.id} report={report} edit={() => editReport(report)} />}
+    {scenario === "free" && history.some((item) => item.workbookId === workbookId) && <details className="panel general-history">
       <summary>此工作簿的历史分析</summary>
       <ul className="history-list">{history.filter((item) => item.workbookId === workbookId).map((item) => <li key={item.id}>
         <button onClick={() => { setReport(item); setQuestion(item.question); setPlan(undefined); setSheet(item.sheet); setNotice(""); setError(""); }} disabled={!!busy}>

@@ -18,6 +18,8 @@ import { manualPlanSchema } from "./analysis-plan.ts";
 import type { AnalysisSource } from "../shared/analysis.ts";
 import { slaSampleWeek } from "../shared/sla.ts";
 import { reviewSla, slaReviewKey } from "./sla.ts";
+import { deliverySampleWeek } from "../shared/delivery.ts";
+import { reviewDelivery, deliveryReviewKey } from "./delivery.ts";
 
 function json(res: ServerResponse, status: number, body: unknown) {
   res.writeHead(status, { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store" });
@@ -56,8 +58,9 @@ const workbookTemplates = new Map([
   ["/api/import/template", "marginops-import.xlsx"],
   ["/api/analysis/template", "marginops-analysis-template.xlsx"],
   ["/api/analysis/sla/template", "marginops-sla-template.xlsx"],
+  ["/api/analysis/delivery/template", "marginops-delivery-template.xlsx"],
 ]);
-const slaRequest = z.discriminatedUnion("sample", [
+const weeklyReviewRequest = z.discriminatedUnion("sample", [
   z.object({ sample: z.literal(true) }),
   z.object({ sample: z.literal(false), workbookId, weekStart: z.iso.date() }),
 ]);
@@ -147,21 +150,25 @@ export function createApi({
         const book = await profileWorkbook(await workbookBody(req), options.data.name, options.data.headerRow);
         store.saveWorkbook(book);
         json(res, 200, book.summary);
-      } else if (req.method === "POST" && path === "/api/analysis/sla") {
-        const input = slaRequest.safeParse(await body(req));
+      } else if (req.method === "POST" && (path === "/api/analysis/sla" || path === "/api/analysis/delivery")) {
+        const input = weeklyReviewRequest.safeParse(await body(req));
+        const kind = path.endsWith("/sla") ? "sla" : "delivery";
         if (!input.success) json(res, 400, { error: "请选择工作簿和有效的本期开始日期。" });
         else {
           const book = input.data.sample
-            ? await profileWorkbook(await readFile(resolve("server/samples/service-sla.xlsx")), "客服 SLA 示例.xlsx", 1)
+            ? kind === "sla"
+              ? await profileWorkbook(await readFile(resolve("server/samples/service-sla.xlsx")), "客服 SLA 示例.xlsx", 1)
+              : await profileWorkbook(await readFile(resolve("server/samples/project-delivery.xlsx")), "项目交付示例.xlsx", 1)
             : store.readWorkbook(input.data.workbookId);
           if (!book || book.summary.kind) json(res, 404, { error: "未找到可复盘的原始工作簿。" });
           else {
-            const weekStart = input.data.sample ? slaSampleWeek : input.data.weekStart;
-            const saved = store.readSlaReview(slaReviewKey(book.summary.id, weekStart));
+            const weekStart = input.data.sample ? kind === "sla" ? slaSampleWeek : deliverySampleWeek : input.data.weekStart;
+            const key = kind === "sla" ? slaReviewKey : deliveryReviewKey;
+            const saved = store.readWeeklyReview(kind, key(book.summary.id, weekStart));
             if (saved) json(res, 200, saved);
             else {
-              const { snapshot, reports, review } = await reviewSla(book, weekStart);
-              json(res, 200, store.saveSlaReview(snapshot, reports, review));
+              const { snapshot, reports, review } = await (kind === "sla" ? reviewSla : reviewDelivery)(book, weekStart);
+              json(res, 200, store.saveWeeklyReview(kind, snapshot, reports, review));
             }
           }
         }
